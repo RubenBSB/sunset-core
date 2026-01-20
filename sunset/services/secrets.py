@@ -10,7 +10,6 @@ import os
 import logging
 from typing import Optional
 from functools import lru_cache
-from google.cloud import secretmanager
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +49,7 @@ class SecretsService:
     def secret_client(self):
         """Lazy-load the secret manager client."""
         if self._secret_client is None:
+            from google.cloud import secretmanager
             self._secret_client = secretmanager.SecretManagerServiceClient()
         return self._secret_client
 
