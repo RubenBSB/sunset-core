@@ -1,24 +1,13 @@
 """
-WhatsApp service for handling Meta Business API interactions.
+WhatsApp service for handling API interactions.
 
-Project-agnostic service that handles:
+Generic, reusable service for:
 - Message deduplication
 - Typing indicators
 - Media handling
-- Message sending
+- Message sending (Meta Graph API and Twilio)
 
 Business logic (reply generation) is injected via callback.
-
-Usage:
-    from sunset.services import WhatsAppService, SecretsService
-
-    secrets = SecretsService()
-    whatsapp = WhatsAppService(
-        phone_number_id=secrets.get_secret("WHATSAPP_PHONE_NUMBER_ID"),
-        token=secrets.get_secret("WHATSAPP_TOKEN"),
-    )
-
-    await whatsapp.send_message(http_client, "+1234567890", "Hello!")
 """
 
 import asyncio
@@ -31,26 +20,80 @@ from threading import Lock
 
 import httpx
 from fastapi import HTTPException, status
+from twilio.rest import Client as TwilioClient
 
+from core.services.secrets_service import get_secrets
 
 logger = logging.getLogger(__name__)
 
+# Type alias for message handler callback
+# Handler receives message data, returns reply text (or None)
 MessageHandler = Callable[[Dict[str, Any]], Awaitable[Optional[str]]]
 
 
-class WhatsAppService:
-    """Service for WhatsApp bot operations."""
+class TwilioService:
+    """Singleton service for Twilio WhatsApp operations."""
+
+    _instance = None
+
+    def __init__(self):
+        self.secrets = get_secrets()
+        account_sid = self.secrets.get_secret("TWILIO_ACCOUNT_SID")
+        auth_token = self.secrets.get_secret("TWILIO_AUTH_TOKEN")
+        self._from_number = self.secrets.get_secret("TWILIO_WHATSAPP_FROM")
+        self._client = TwilioClient(account_sid, auth_token)
+        logger.info("Twilio service initialized")
+
+    @classmethod
+    def get_instance(cls) -> "TwilioService":
+        """Get the singleton instance."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def send_message(self, to: str, body: str) -> None:
+        """Send a WhatsApp message via Twilio."""
+        # Ensure proper whatsapp: prefix
+        from_addr = (
+            self._from_number
+            if self._from_number.startswith("whatsapp:")
+            else f"whatsapp:{self._from_number}"
+        )
+        to_addr = to if to.startswith("whatsapp:") else f"whatsapp:{to}"
+
+        self._client.messages.create(from_=from_addr, to=to_addr, body=body)
+        logger.info(f"Twilio message sent to {to}")
+
+
+class WhatsappService:
+    """Singleton service for WhatsApp bot operations."""
+
+    _instance = None
 
     MAX_CACHE_SIZE = 1000
     TYPING_INDICATOR_DELAY = 1.5
     GRAPH_API_VERSION = "v19.0"
 
-    def __init__(self, phone_number_id: str, token: str):
-        self._phone_number_id = phone_number_id
-        self._token = token
+    def __init__(self):
+        self.secrets = get_secrets()
+        self._phone_number_id = self.secrets.get_secret("WHATSAPP_PHONE_NUMBER_ID")
+        self._token = self.secrets.get_secret("WHATSAPP_TOKEN")
+
         self._processed_messages: OrderedDict[str, bool] = OrderedDict()
         self._cache_lock = Lock()
+
         logger.info("WhatsApp service initialized")
+
+    @classmethod
+    def get_instance(cls) -> "WhatsappService":
+        """Get the singleton instance."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    # -------------------------------------------------------------------------
+    # Deduplication
+    # -------------------------------------------------------------------------
 
     def is_duplicate(self, message_id: Optional[str]) -> bool:
         """Check if message was already processed."""
@@ -67,8 +110,13 @@ class WhatsAppService:
 
             return False
 
+    # -------------------------------------------------------------------------
+    # WhatsApp API
+    # -------------------------------------------------------------------------
+
     def _convert_to_whatsapp_markdown(self, text: str) -> str:
         """Convert standard markdown to WhatsApp format."""
+        # Protect code blocks
         code_blocks = []
 
         def save_code_block(match):
@@ -77,6 +125,7 @@ class WhatsAppService:
 
         processed = re.sub(r"```[\s\S]*?```", save_code_block, text)
 
+        # Protect inline code
         inline_codes = []
 
         def save_inline_code(match):
@@ -85,9 +134,12 @@ class WhatsAppService:
 
         processed = re.sub(r"`[^`]+`", save_inline_code, processed)
 
+        # **bold** -> *bold*
         processed = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", processed)
+        # ~~strike~~ -> ~strike~
         processed = re.sub(r"~~([^~]+)~~", r"~\1~", processed)
 
+        # Restore
         for i, code in enumerate(inline_codes):
             processed = processed.replace(f"__INLINE_CODE_{i}__", code)
         for i, block in enumerate(code_blocks):
@@ -114,6 +166,12 @@ class WhatsAppService:
 
             media_response = await http_client.get(media_url, headers=headers)
             media_response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(f"WhatsApp media error: {exc.response.status_code}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to download media",
+            )
         except httpx.HTTPError as exc:
             logger.exception(f"WhatsApp media request failed: {exc}")
             raise HTTPException(
@@ -143,6 +201,7 @@ class WhatsAppService:
         try:
             response = await http_client.post(url, headers=headers, json=payload)
             response.raise_for_status()
+            logger.info(f"Typing indicator sent for {message_id}")
         except httpx.HTTPError as exc:
             logger.warning(f"Failed to send typing indicator: {exc}")
 
@@ -167,6 +226,14 @@ class WhatsAppService:
         try:
             response = await http_client.post(url, headers=headers, json=payload)
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                f"WhatsApp API error: {exc.response.status_code} | {exc.response.text}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to send WhatsApp message",
+            )
         except httpx.HTTPError as exc:
             logger.exception(f"WhatsApp API request failed: {exc}")
             raise HTTPException(
@@ -174,13 +241,31 @@ class WhatsAppService:
                 detail="WhatsApp API request failed",
             )
 
+    # -------------------------------------------------------------------------
+    # Message Processing
+    # -------------------------------------------------------------------------
+
+    async def _delayed_typing_indicator(
+        self, delay: float, http_client, message_id: str
+    ) -> None:
+        """Send typing indicator after delay."""
+        await asyncio.sleep(delay)
+        await self.send_typing_indicator(http_client, message_id)
+
     async def process_webhook_message(
         self,
         message_data: Dict[str, Any],
         http_client: httpx.AsyncClient,
         message_handler: MessageHandler,
     ) -> None:
-        """Process incoming WhatsApp webhook message and send reply."""
+        """
+        Process incoming WhatsApp webhook message and send reply.
+
+        Args:
+            message_data: Extracted message data (id, sender, text, etc.)
+            http_client: HTTP client for WhatsApp API calls
+            message_handler: Async callback (message_data) -> reply_text
+        """
         typing_task = None
         sender = message_data["sender"]
         message_id = message_data.get("id")
@@ -188,7 +273,9 @@ class WhatsAppService:
         try:
             if message_id:
                 typing_task = asyncio.create_task(
-                    self._delayed_typing_indicator(http_client, message_id)
+                    self._delayed_typing_indicator(
+                        self.TYPING_INDICATOR_DELAY, http_client, message_id
+                    )
                 )
 
             reply = await message_handler(message_data)
@@ -205,16 +292,13 @@ class WhatsAppService:
             if typing_task and not typing_task.done():
                 typing_task.cancel()
 
-    async def _delayed_typing_indicator(
-        self, http_client: httpx.AsyncClient, message_id: str
-    ) -> None:
-        """Send typing indicator after delay."""
-        await asyncio.sleep(self.TYPING_INDICATOR_DELAY)
-        await self.send_typing_indicator(http_client, message_id)
-
 
 def extract_webhook_message(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Extract message data from WhatsApp webhook payload."""
+    """
+    Extract message data from WhatsApp webhook payload.
+
+    Returns dict with: id, name, sender, text, image_media_id
+    """
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
