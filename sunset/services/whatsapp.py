@@ -22,7 +22,7 @@ import httpx
 from fastapi import HTTPException, status
 from twilio.rest import Client as TwilioClient
 
-from core.services.secrets_service import get_secrets
+from sunset.services.secrets import get_secrets
 
 logger = logging.getLogger(__name__)
 
