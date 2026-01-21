@@ -3,7 +3,7 @@ Google Cloud Pub/Sub service for async messaging.
 
 Usage:
     from sunset.services import PubSubService
-    
+
     pubsub = PubSubService()
     pubsub.publish("my-topic", {"user_id": "123", "action": "signup"})
 """
@@ -27,11 +27,17 @@ class PubSubService:
 
     _instance: Optional["PubSubService"] = None
 
-    def __init__(self, project_id: Optional[str] = None, topic_prefix: Optional[str] = None):
+    def __init__(
+        self, project_id: Optional[str] = None, topic_prefix: Optional[str] = None
+    ):
         env = os.getenv("ENV", "local")
         self.env = "prod" if env == "production" else env
         self.emulator_host = os.getenv("PUBSUB_EMULATOR_HOST")
-        self.project_id = project_id or os.getenv("PUBSUB_PROJECT_ID") or os.getenv("GCP_PROJECT_ID", "local-test-project")
+        self.project_id = (
+            project_id
+            or os.getenv("PUBSUB_PROJECT_ID")
+            or os.getenv("GCP_PROJECT_ID", "local-test-project")
+        )
         self.topic_prefix = topic_prefix or os.getenv("PUBSUB_TOPIC_PREFIX", "app")
 
         self.publisher = pubsub_v1.PublisherClient()
@@ -52,10 +58,14 @@ class PubSubService:
         return cls._instance
 
     def get_topic_path(self, topic_name: str) -> str:
-        return self.publisher.topic_path(self.project_id, f"{self.topic_prefix}-{topic_name}-{self.env}")
+        return self.publisher.topic_path(
+            self.project_id, f"{self.topic_prefix}-{topic_name}-{self.env}"
+        )
 
     def get_subscription_path(self, topic_name: str) -> str:
-        return self.subscriber.subscription_path(self.project_id, f"{self.topic_prefix}-{topic_name}-sub-{self.env}")
+        return self.subscriber.subscription_path(
+            self.project_id, f"{self.topic_prefix}-{topic_name}-sub-{self.env}"
+        )
 
     def ensure_topic_exists(self, topic_name: str) -> str:
         topic_path = self.get_topic_path(topic_name)
@@ -72,7 +82,9 @@ class PubSubService:
 
             sub_path = self.get_subscription_path(topic_name)
             try:
-                self.subscriber.create_subscription(request={"name": sub_path, "topic": topic_path})
+                self.subscriber.create_subscription(
+                    request={"name": sub_path, "topic": topic_path}
+                )
                 logger.info(f"Created subscription: {sub_path}")
             except AlreadyExists:
                 pass
@@ -80,7 +92,12 @@ class PubSubService:
         self._created_topics.add(topic_path)
         return topic_path
 
-    def publish(self, topic_name: str, data: Dict[str, Any], attributes: Optional[Dict[str, str]] = None) -> str:
+    def publish(
+        self,
+        topic_name: str,
+        data: Dict[str, Any],
+        attributes: Optional[Dict[str, str]] = None,
+    ) -> str:
         topic_path = self.ensure_topic_exists(topic_name)
         message_bytes = json.dumps(data).encode("utf-8")
 
@@ -94,6 +111,7 @@ class PubSubService:
         def decorator(func: MessageHandler):
             self._message_handlers[topic_name] = func
             return func
+
         return decorator
 
     def process_message(self, topic_name: str, data: dict) -> Any:

@@ -3,7 +3,7 @@ Analytics service using PostHog.
 
 Usage:
     from sunset.services import AnalyticsService
-    
+
     analytics = AnalyticsService()
     analytics.track_event(user_id, "button_clicked", {"button": "signup"})
 """
@@ -44,12 +44,16 @@ class AnalyticsService:
     def is_enabled(self) -> bool:
         return bool(self.api_key)
 
-    def track_event(self, user_id: str, event: str, properties: Optional[Dict[str, Any]] = None) -> None:
+    def track_event(
+        self, user_id: str, event: str, properties: Optional[Dict[str, Any]] = None
+    ) -> None:
         if not self.is_enabled():
             return
 
         try:
-            posthog.capture(distinct_id=user_id, event=event, properties=properties or {})
+            posthog.capture(
+                distinct_id=user_id, event=event, properties=properties or {}
+            )
             logger.debug(f"Tracked event: {event} for user: {user_id}")
         except Exception as e:
             logger.error(f"Failed to track event {event}: {e}")
@@ -64,8 +68,28 @@ class AnalyticsService:
         except Exception as e:
             logger.error(f"Failed to identify user {user_id}: {e}")
 
-    def track_user_login(self, user_id: str, email: str, login_method: str = "google") -> None:
-        self.track_event(user_id, "user_login", {"email": email, "login_method": login_method, "timestamp": datetime.utcnow().isoformat()})
+    def track_user_login(
+        self, user_id: str, email: str, login_method: str = "google"
+    ) -> None:
+        self.track_event(
+            user_id,
+            "user_login",
+            {
+                "email": email,
+                "login_method": login_method,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
 
-    def track_user_signup(self, user_id: str, email: str, signup_method: str = "google") -> None:
-        self.track_event(user_id, "user_signup", {"email": email, "signup_method": signup_method, "timestamp": datetime.utcnow().isoformat()})
+    def track_user_signup(
+        self, user_id: str, email: str, signup_method: str = "google"
+    ) -> None:
+        self.track_event(
+            user_id,
+            "user_signup",
+            {
+                "email": email,
+                "signup_method": signup_method,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )

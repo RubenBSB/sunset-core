@@ -3,7 +3,7 @@ LLM service supporting multiple providers (OpenAI, Gemini).
 
 Usage:
     from sunset.services import LLMService
-    
+
     llm = LLMService(openai_api_key="...")
     response = await llm.complete("What is 2+2?")
 """
@@ -40,6 +40,7 @@ class LLMService:
         if gemini_api_key:
             try:
                 import google.generativeai as genai
+
                 genai.configure(api_key=gemini_api_key)
                 self.gemini_client = genai
                 logger.info("Gemini client initialized")
@@ -75,7 +76,13 @@ class LLMService:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        return await self.chat(messages=messages, provider=provider, model=model, temperature=temperature, max_tokens=max_tokens)
+        return await self.chat(
+            messages=messages,
+            provider=provider,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     async def chat(
         self,
@@ -95,28 +102,49 @@ class LLMService:
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
-    async def _openai_chat(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> str:
+    async def _openai_chat(
+        self,
+        messages: List[Dict[str, str]],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
         if not self.openai_client:
             raise ValueError("OpenAI client not initialized")
 
         response = await self.openai_client.chat.completions.create(
-            model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         return response.choices[0].message.content
 
-    async def _gemini_chat(self, messages: List[Dict[str, str]], model: str, temperature: float, max_tokens: int) -> str:
+    async def _gemini_chat(
+        self,
+        messages: List[Dict[str, str]],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
         if not self.gemini_client:
             raise ValueError("Gemini client not initialized")
 
         gemini_model = self.gemini_client.GenerativeModel(model)
-        
+
         history = []
         for msg in messages[:-1]:
             role = "user" if msg["role"] == "user" else "model"
             history.append({"role": role, "parts": [msg["content"]]})
 
         chat = gemini_model.start_chat(history=history)
-        
+
         last_message = messages[-1]["content"]
-        response = chat.send_message(last_message, generation_config={"temperature": temperature, "max_output_tokens": max_tokens})
+        response = chat.send_message(
+            last_message,
+            generation_config={
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+            },
+        )
         return response.text

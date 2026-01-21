@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 class SecretsService:
     """
     Unified secrets loader.
-    
+
     Usage:
         from sunset.services import SecretsService
-        
+
         secrets = SecretsService()
         api_key = secrets.get_secret("OPENAI_API_KEY")
     """
@@ -50,6 +50,7 @@ class SecretsService:
         """Lazy-load the secret manager client."""
         if self._secret_client is None:
             from google.cloud import secretmanager
+
             self._secret_client = secretmanager.SecretManagerServiceClient()
         return self._secret_client
 
@@ -57,6 +58,7 @@ class SecretsService:
         """Load .env.local for local development."""
         try:
             from dotenv import load_dotenv
+
             load_dotenv(".env.local")
         except ImportError:
             logger.warning(
@@ -85,14 +87,14 @@ class SecretsService:
     def get_secret(self, secret_name: str, default: Optional[str] = None) -> str:
         """
         Retrieve a secret.
-        
+
         Args:
             secret_name: Name of the secret (e.g., "OPENAI_API_KEY" or "openai-api-key")
             default: Default value if secret not found
-            
+
         Returns:
             The secret value
-            
+
         Raises:
             ValueError: If secret not found and no default provided
         """

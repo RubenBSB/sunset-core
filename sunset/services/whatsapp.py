@@ -11,13 +11,13 @@ Business logic (reply generation) is injected via callback.
 
 Usage:
     from sunset.services import WhatsAppService, SecretsService
-    
+
     secrets = SecretsService()
     whatsapp = WhatsAppService(
         phone_number_id=secrets.get_secret("WHATSAPP_PHONE_NUMBER_ID"),
         token=secrets.get_secret("WHATSAPP_TOKEN"),
     )
-    
+
     await whatsapp.send_message(http_client, "+1234567890", "Hello!")
 """
 
@@ -70,19 +70,23 @@ class WhatsAppService:
     def _convert_to_whatsapp_markdown(self, text: str) -> str:
         """Convert standard markdown to WhatsApp format."""
         code_blocks = []
+
         def save_code_block(match):
             code_blocks.append(match.group(0))
             return f"__CODE_BLOCK_{len(code_blocks) - 1}__"
-        processed = re.sub(r'```[\s\S]*?```', save_code_block, text)
+
+        processed = re.sub(r"```[\s\S]*?```", save_code_block, text)
 
         inline_codes = []
+
         def save_inline_code(match):
             inline_codes.append(match.group(0))
             return f"__INLINE_CODE_{len(inline_codes) - 1}__"
-        processed = re.sub(r'`[^`]+`', save_inline_code, processed)
 
-        processed = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', processed)
-        processed = re.sub(r'~~([^~]+)~~', r'~\1~', processed)
+        processed = re.sub(r"`[^`]+`", save_inline_code, processed)
+
+        processed = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", processed)
+        processed = re.sub(r"~~([^~]+)~~", r"~\1~", processed)
 
         for i, code in enumerate(inline_codes):
             processed = processed.replace(f"__INLINE_CODE_{i}__", code)
@@ -91,7 +95,9 @@ class WhatsAppService:
 
         return processed
 
-    async def download_media(self, http_client: httpx.AsyncClient, media_id: str) -> str:
+    async def download_media(
+        self, http_client: httpx.AsyncClient, media_id: str
+    ) -> str:
         """Download WhatsApp media and return as base64 data URL."""
         headers = {"Authorization": f"Bearer {self._token}"}
         meta_url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}/{media_id}"
@@ -101,22 +107,32 @@ class WhatsAppService:
             meta_response.raise_for_status()
             media_url = meta_response.json().get("url")
             if not media_url:
-                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to resolve media URL")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Failed to resolve media URL",
+                )
 
             media_response = await http_client.get(media_url, headers=headers)
             media_response.raise_for_status()
         except httpx.HTTPError as exc:
             logger.exception(f"WhatsApp media request failed: {exc}")
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Media request failed")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, detail="Media request failed"
+            )
 
         mime_type = media_response.headers.get("Content-Type", "image/jpeg")
         data = base64.b64encode(media_response.content).decode("ascii")
         return f"data:{mime_type};base64,{data}"
 
-    async def send_typing_indicator(self, http_client: httpx.AsyncClient, message_id: str) -> None:
+    async def send_typing_indicator(
+        self, http_client: httpx.AsyncClient, message_id: str
+    ) -> None:
         """Send typing indicator and mark message as read."""
         url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}/{self._phone_number_id}/messages"
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
         payload = {
             "messaging_product": "whatsapp",
             "status": "read",
@@ -130,12 +146,17 @@ class WhatsAppService:
         except httpx.HTTPError as exc:
             logger.warning(f"Failed to send typing indicator: {exc}")
 
-    async def send_message(self, http_client: httpx.AsyncClient, to: str, text: str) -> None:
+    async def send_message(
+        self, http_client: httpx.AsyncClient, to: str, text: str
+    ) -> None:
         """Send a WhatsApp text message."""
         whatsapp_text = self._convert_to_whatsapp_markdown(text)
 
         url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}/{self._phone_number_id}/messages"
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
         payload = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -148,7 +169,10 @@ class WhatsAppService:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             logger.exception(f"WhatsApp API request failed: {exc}")
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="WhatsApp API request failed")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="WhatsApp API request failed",
+            )
 
     async def process_webhook_message(
         self,
@@ -163,7 +187,9 @@ class WhatsAppService:
 
         try:
             if message_id:
-                typing_task = asyncio.create_task(self._delayed_typing_indicator(http_client, message_id))
+                typing_task = asyncio.create_task(
+                    self._delayed_typing_indicator(http_client, message_id)
+                )
 
             reply = await message_handler(message_data)
 
@@ -179,7 +205,9 @@ class WhatsAppService:
             if typing_task and not typing_task.done():
                 typing_task.cancel()
 
-    async def _delayed_typing_indicator(self, http_client: httpx.AsyncClient, message_id: str) -> None:
+    async def _delayed_typing_indicator(
+        self, http_client: httpx.AsyncClient, message_id: str
+    ) -> None:
         """Send typing indicator after delay."""
         await asyncio.sleep(self.TYPING_INDICATOR_DELAY)
         await self.send_typing_indicator(http_client, message_id)
@@ -203,11 +231,23 @@ def extract_webhook_message(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 if msg_type == "text":
                     text_body = message.get("text", {}).get("body")
                     if text_body:
-                        return {"id": msg_id, "name": name, "sender": sender, "text": text_body.strip(), "image_media_id": None}
+                        return {
+                            "id": msg_id,
+                            "name": name,
+                            "sender": sender,
+                            "text": text_body.strip(),
+                            "image_media_id": None,
+                        }
 
                 if msg_type == "image":
                     image = message.get("image", {}) or {}
                     media_id = image.get("id")
                     if media_id:
-                        return {"id": msg_id, "name": name, "sender": sender, "text": (image.get("caption") or "").strip() or None, "image_media_id": media_id}
+                        return {
+                            "id": msg_id,
+                            "name": name,
+                            "sender": sender,
+                            "text": (image.get("caption") or "").strip() or None,
+                            "image_media_id": media_id,
+                        }
     return None
