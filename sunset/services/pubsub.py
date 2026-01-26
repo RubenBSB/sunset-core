@@ -44,9 +44,9 @@ class PubSubService:
             # Active SSE connections
             self.active_connections: Dict[str, asyncio.Queue] = {}
 
-            # Subscriber management
-            self._subscriber_manager = None
-            self._subscriber_task = None
+            # Subscriber management (multiple subscribers supported)
+            self._subscriber_managers: Dict[str, "PubSubSubscriberManager"] = {}
+            self._subscriber_tasks: Dict[str, asyncio.Task] = {}
 
             # Store reference to main event loop for cross-thread communication
             self._main_loop = None
@@ -179,8 +179,8 @@ class PubSubService:
         Args:
             topic_name: Name of the topic (e.g., "extraction")
         """
-        if self._subscriber_manager is not None:
-            logger.warning("Pub/Sub subscriber already running")
+        if topic_name in self._subscriber_managers:
+            logger.warning(f"Pub/Sub subscriber already running for {topic_name}")
             return
 
         # Store reference to the main event loop
@@ -191,37 +191,53 @@ class PubSubService:
 
         subscription_path = self.get_subscription_path(topic_name)
 
-        self._subscriber_manager = PubSubSubscriberManager(
-            self, subscription_path, topic_name
-        )
-        self._subscriber_task = asyncio.create_task(self._subscriber_manager.start())
+        manager = PubSubSubscriberManager(self, subscription_path, topic_name)
+        self._subscriber_managers[topic_name] = manager
+        self._subscriber_tasks[topic_name] = asyncio.create_task(manager.start())
         logger.info(f"Pub/Sub subscriber started for {subscription_path}")
 
-    async def stop_subscriber(self):
-        """Stop the Pub/Sub subscriber on application shutdown"""
-        if self._subscriber_manager is None:
-            logger.warning("Pub/Sub subscriber not running")
+    async def stop_subscriber(self, topic_name: str = None):
+        """Stop Pub/Sub subscriber(s) on application shutdown.
+
+        Args:
+            topic_name: Optional topic name to stop. If None, stops all subscribers.
+        """
+        if not self._subscriber_managers:
+            logger.warning("No Pub/Sub subscribers running")
             return
 
-        await self._subscriber_manager.stop()
+        topics_to_stop = (
+            [topic_name] if topic_name else list(self._subscriber_managers.keys())
+        )
 
-        if self._subscriber_task:
-            try:
-                await asyncio.wait_for(self._subscriber_task, timeout=10.0)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Pub/Sub subscriber did not stop gracefully, cancelling..."
-                )
-                self._subscriber_task.cancel()
+        for name in topics_to_stop:
+            manager = self._subscriber_managers.get(name)
+            task = self._subscriber_tasks.get(name)
+
+            if not manager:
+                continue
+
+            await manager.stop()
+
+            if task:
                 try:
-                    await self._subscriber_task
-                except asyncio.CancelledError:
-                    pass
+                    await asyncio.wait_for(task, timeout=10.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Pub/Sub subscriber for {name} did not stop gracefully, cancelling..."
+                    )
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
-        self._subscriber_manager = None
-        self._subscriber_task = None
-        self._main_loop = None  # Clear the event loop reference
-        logger.info("Pub/Sub subscriber stopped")
+            self._subscriber_managers.pop(name, None)
+            self._subscriber_tasks.pop(name, None)
+            logger.info(f"Pub/Sub subscriber stopped for {name}")
+
+        if not self._subscriber_managers:
+            self._main_loop = None
 
 
 class PubSubSubscriberManager:

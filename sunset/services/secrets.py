@@ -27,25 +27,27 @@ class SecretsService:
     def get_secret(self, secret_name: str, default: Optional[str] = None) -> str:
         """
         Retrieve a secret:
-        - Local: from environment (via .env.local)
-        - Staging/Prod: from GCP Secret Manager
+        1. First check environment variable
+        2. Then try GCP Secret Manager (if not local)
+        3. Fall back to default if provided
         """
+        env_var = secret_name.upper().replace("-", "_")
+
+        # Always check environment first
+        env_value = os.getenv(env_var)
+        if env_value is not None:
+            return env_value
+
+        # Local: env var is the only source
         if self.env == "local":
-            env_var = secret_name.upper().replace("-", "_")
-            value = os.getenv(env_var, default)
+            if default is not None:
+                return default
+            raise ValueError(f"Missing secret {env_var} in environment")
 
-            if value is None:
-                raise ValueError(f"Missing secret {env_var} in .env.local")
-
-            return value
-
-        # Remote (GCP Secret Manager)
+        # Remote: try GCP Secret Manager
         try:
-            if secret_name.upper().replace("-", "_") == secret_name:
-                secret_name = secret_name.lower().replace("_", "-")
-            path = (
-                f"projects/{self.project_id}/secrets/" f"{secret_name}/versions/latest"
-            )
+            secret_key = secret_name.lower().replace("_", "-")
+            path = f"projects/{self.project_id}/secrets/{secret_key}/versions/latest"
             response = self.secret_client.access_secret_version(request={"name": path})
             return response.payload.data.decode("UTF-8")
 
