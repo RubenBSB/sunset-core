@@ -49,9 +49,6 @@ class StorageService:
 
     def _get_signing_service_account(self, secrets) -> Optional[str]:
         """Get the service account email to use for signing URLs."""
-        # First check if credentials already have a service account email (Cloud Run/GCE)
-        if hasattr(self._credentials, "service_account_email"):
-            return self._credentials.service_account_email
 
         # For local dev, try to get from secrets/env
         sa_email = secrets.get_secret("GCS_SIGNING_SERVICE_ACCOUNT", default=None)
