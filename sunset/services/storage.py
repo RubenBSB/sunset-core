@@ -146,6 +146,8 @@ class StorageService:
             # Refresh credentials to ensure we have a valid token
             self._credentials.refresh(google_requests.Request())
 
+            logger.info(f"Signing URL for service account: {self._signing_sa_email}")
+
             url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(minutes=expiration_minutes),
