@@ -144,8 +144,7 @@ class StorageService:
                 )
 
             # Refresh credentials to ensure we have a valid token
-            if not self._credentials.token:
-                self._credentials.refresh(google_requests.Request())
+            self._credentials.refresh(google_requests.Request())
 
             url = blob.generate_signed_url(
                 version="v4",
