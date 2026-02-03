@@ -1,12 +1,11 @@
-import os
-import jwt
-import time
 import json
 import logging
-from typing import Optional, Dict, Any
+import os
+import time
+from typing import Any, Dict, Optional
 
 import httpx
-
+import jwt
 from cryptography.hazmat.primitives import serialization
 
 logger = logging.getLogger(__name__)

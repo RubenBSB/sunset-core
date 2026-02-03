@@ -2,6 +2,7 @@
 
 __all__ = [
     "SecretsService",
+    "AuthService",
     "WhatsAppService",
     "extract_webhook_message",
     "StorageService",
@@ -17,6 +18,10 @@ def __getattr__(name: str):
         from sunset.services.secrets import SecretsService
 
         return SecretsService
+    if name == "AuthService":
+        from sunset.services.auth import AuthService
+
+        return AuthService
     if name == "WhatsAppService":
         from sunset.services.whatsapp import WhatsAppService
 

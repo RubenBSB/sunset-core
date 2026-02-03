@@ -1,8 +1,9 @@
-import os
-import posthog
-from datetime import datetime
-from typing import Optional, Dict, Any
 import logging
+import os
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+import posthog
 
 logger = logging.getLogger(__name__)
 

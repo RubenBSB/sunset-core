@@ -1,16 +1,15 @@
+import base64
 import json
 import logging
-import time
-import base64
 import re
+import time
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any, TypedDict, Type, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Type, TypedDict
 
-from pydantic import BaseModel
-
-from openai import AsyncOpenAI
 from google import genai
 from google.genai import types
+from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -122,18 +121,45 @@ class LLMService(ABC):
 class OpenAIService(LLMService):
     """OpenAI Responses API implementation with vector store file search."""
 
-    def __init__(self, api_key: str, file_store_id: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: str,
+        file_store_id: Optional[str] = None,
+        file_store_name: Optional[str] = None,
+    ):
         self.api_key = api_key
         super().__init__()
         self.file_store_id = file_store_id
+        self.file_store_name = file_store_name or "knowledge-base"
         self._file_store = None  # Lazy-loaded
 
     async def get_file_store(self):
-        """Lazily retrieve and cache the file store."""
-        if not self._file_store and self.file_store_id:
+        """
+        Lazily retrieve or create and cache the file store.
+
+        If file_store_id is provided, retrieves the existing store.
+        If not provided, creates a new store with file_store_name.
+        """
+        if self._file_store:
+            return self._file_store
+
+        if self.file_store_id:
+            # Retrieve existing store
             self._file_store = await self.client.vector_stores.retrieve(
                 vector_store_id=self.file_store_id
             )
+        else:
+            # Create new store lazily
+            self._file_store = await self.client.vector_stores.create(
+                name=self.file_store_name
+            )
+            self.file_store_id = self._file_store.id
+            logger.info(
+                f"Created OpenAI vector store: {self._file_store.id} "
+                f"(name: {self.file_store_name}). "
+                "Save this ID to OPENAI_FILE_STORE_ID to reuse."
+            )
+
         return self._file_store
 
     def get_client(self):
@@ -398,15 +424,30 @@ class OpenAIService(LLMService):
 class GeminiService(LLMService):
     """Google Gemini API implementation with file search store grounding."""
 
-    def __init__(self, api_key: str, file_store_id: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: str,
+        file_store_id: Optional[str] = None,
+        file_store_name: Optional[str] = None,
+    ):
         self.api_key = api_key
         super().__init__()
         self.file_store_id = file_store_id
+        self.file_store_name = file_store_name or "knowledge-base"
         self._file_store = None  # Lazy-loaded
 
     async def get_file_store(self):
-        """Lazily retrieve and cache the file store."""
-        if not self._file_store and self.file_store_id:
+        """
+        Lazily retrieve or create and cache the file store.
+
+        If file_store_id is provided, retrieves the existing store.
+        If not provided, creates a new store with file_store_name.
+        """
+        if self._file_store:
+            return self._file_store
+
+        if self.file_store_id:
+            # Retrieve existing store
             try:
                 self._file_store = await self.client.aio.file_search_stores.get(
                     name=self.file_store_id
@@ -414,6 +455,22 @@ class GeminiService(LLMService):
             except Exception as e:
                 logger.error(f"Failed to retrieve Gemini file store: {e}")
                 return None
+        else:
+            # Create new store lazily
+            try:
+                self._file_store = self.client.file_search_stores.create(
+                    config={"display_name": self.file_store_name}
+                )
+                self.file_store_id = self._file_store.name
+                logger.info(
+                    f"Created Gemini file search store: {self._file_store.name} "
+                    f"(display_name: {self.file_store_name}). "
+                    "Save this ID to GEMINI_FILE_STORE_ID to reuse."
+                )
+            except Exception as e:
+                logger.error(f"Failed to create Gemini file store: {e}")
+                return None
+
         return self._file_store
 
     def get_client(self):
@@ -991,33 +1048,593 @@ class GeminiService(LLMService):
         )
 
 
+class VertexAIGeminiService(LLMService):
+    """
+    Vertex AI Gemini implementation for GDPR-compliant, scalable deployments.
+
+    Uses Google Cloud authentication (ADC) instead of API key.
+    Data stays within the specified GCP region (e.g., europe-west1 for EU).
+
+    RAG is supported via Vertex AI RAG Engine when rag_corpus_name is provided.
+    Use file_search=True with rag_filter to query the RAG corpus.
+    """
+
+    def __init__(
+        self,
+        project: str,
+        location: str = "europe-west1",
+        rag_corpus_name: Optional[str] = None,
+    ):
+        self.project = project
+        self.location = location
+        self.rag_corpus_name = rag_corpus_name
+        super().__init__()
+        # Vertex AI doesn't support File Search Stores (uses RAG Engine instead)
+        self.file_store_id = None
+        self._file_store = None
+        self._vertexai_initialized = False
+
+    def get_client(self):
+        if not hasattr(self, "client"):
+            return genai.Client(
+                vertexai=True,
+                project=self.project,
+                location=self.location,
+            )
+        return self.client
+
+    def _ensure_vertexai_init(self):
+        """Initialize vertexai SDK if not already done."""
+        if not self._vertexai_initialized:
+            try:
+                import vertexai
+
+                vertexai.init(project=self.project, location=self.location)
+                self._vertexai_initialized = True
+            except ImportError:
+                raise ImportError(
+                    "google-cloud-aiplatform is required for RAG functions. "
+                    "Install with: pip install google-cloud-aiplatform"
+                )
+
+    async def get_file_store(self):
+        """Vertex AI uses RAG Engine instead of File Search Stores."""
+        if self.rag_corpus_name:
+            return {"rag_corpus_name": self.rag_corpus_name}
+        return None
+
+    def create_file_store(
+        self, store_name: str, initial_files: Optional[List[Dict[str, Any]]] = None
+    ):
+        """Not supported - RAG corpus is created via Terraform."""
+        raise NotImplementedError(
+            "RAG corpus should be created via Terraform (sunset provision). "
+            "Set rag_corpus_name in the constructor to use an existing corpus."
+        )
+
+    def upload_files(self, file_descriptions: List[Dict[str, Any]]):
+        """Not supported - use upload_rag_file instead."""
+        raise NotImplementedError("Use upload_rag_file() for Vertex AI RAG Engine.")
+
+    def upload_rag_file(
+        self,
+        file_path: str,
+        display_name: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Upload a file to the RAG corpus with optional metadata.
+
+        Args:
+            file_path: Local path to the file
+            display_name: Display name for the file in the corpus
+            metadata: Optional metadata dict (e.g., {"doctor_id": "uuid"})
+
+        Returns:
+            Dict with file info including 'name' and 'display_name'
+        """
+        if not self.rag_corpus_name:
+            raise ValueError("rag_corpus_name is required for RAG file operations")
+
+        self._ensure_vertexai_init()
+        from vertexai import rag
+
+        try:
+            rag_file = rag.upload_file(
+                corpus_name=self.rag_corpus_name,
+                path=file_path,
+                display_name=display_name,
+                metadata=metadata,
+            )
+            logger.info(f"Uploaded RAG file: {rag_file.name}")
+            return {
+                "name": rag_file.name,
+                "display_name": display_name,
+                "metadata": metadata,
+            }
+        except Exception as e:
+            logger.error(f"Failed to upload RAG file: {e}")
+            raise
+
+    def list_rag_files(self) -> List[Dict[str, Any]]:
+        """
+        List all files in the RAG corpus.
+
+        Returns:
+            List of file info dicts
+        """
+        if not self.rag_corpus_name:
+            raise ValueError("rag_corpus_name is required for RAG file operations")
+
+        self._ensure_vertexai_init()
+        from vertexai import rag
+
+        try:
+            files = list(rag.list_files(corpus_name=self.rag_corpus_name))
+            return [
+                {
+                    "name": f.name,
+                    "display_name": getattr(f, "display_name", ""),
+                    "size_bytes": getattr(f, "size_bytes", 0),
+                    "create_time": str(getattr(f, "create_time", "")),
+                }
+                for f in files
+            ]
+        except Exception as e:
+            logger.error(f"Failed to list RAG files: {e}")
+            raise
+
+    def delete_rag_file(self, file_name: str) -> bool:
+        """
+        Delete a file from the RAG corpus.
+
+        Args:
+            file_name: Full resource name of the file
+
+        Returns:
+            True if deleted successfully
+        """
+        if not self.rag_corpus_name:
+            raise ValueError("rag_corpus_name is required for RAG file operations")
+
+        self._ensure_vertexai_init()
+        from vertexai import rag
+
+        try:
+            rag.delete_file(name=file_name)
+            logger.info(f"Deleted RAG file: {file_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete RAG file: {e}")
+            raise
+
+    def _parse_data_url(self, data_url: str) -> tuple[bytes, str]:
+        """Parse a data URL and return (bytes, mime_type)."""
+        match = re.match(r"data:([^;]+);base64,(.+)", data_url)
+        if match:
+            mime_type = match.group(1)
+            b64_data = match.group(2)
+            return base64.b64decode(b64_data), mime_type
+        raise ValueError("Invalid data URL format")
+
+    def _convert_to_gemini_messages(
+        self, input: str | List[Dict[str, Any]]
+    ) -> Tuple[Optional[str], List[types.Content]]:
+        """Convert OpenAI-style messages to Gemini format."""
+        system_instruction = None
+        gemini_messages = []
+
+        if isinstance(input, str):
+            gemini_messages.append(
+                types.Content(role="user", parts=[types.Part(text=input)])
+            )
+            return system_instruction, gemini_messages
+
+        for msg in input:
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if role in ("system", "developer"):
+                text = None
+                if isinstance(content, str):
+                    text = content
+                elif (
+                    isinstance(content, list)
+                    and len(content) > 0
+                    and content[0].get("type") == "text"
+                ):
+                    text = content[0].get("text")
+
+                if text:
+                    system_instruction = (
+                        f"{system_instruction}\n\n{text}"
+                        if system_instruction
+                        else text
+                    )
+                continue
+
+            parts = []
+            if isinstance(content, str):
+                parts.append(types.Part(text=content))
+            elif isinstance(content, list):
+                for part in content:
+                    part_type = part.get("type")
+                    if part_type == "text":
+                        parts.append(types.Part(text=part.get("text")))
+                    elif part_type == "input_text":
+                        parts.append(types.Part(text=part.get("text")))
+                    elif part_type in ("input_image", "image_url"):
+                        image_url = part.get("image_url") or part.get("url")
+                        if image_url and image_url.startswith("data:"):
+                            try:
+                                img_bytes, mime_type = self._parse_data_url(image_url)
+                                parts.append(
+                                    types.Part(
+                                        inline_data=types.Blob(
+                                            data=img_bytes, mime_type=mime_type
+                                        )
+                                    )
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to parse image data URL: {e}")
+
+            g_role = "model" if role == "assistant" else "user"
+            if parts:
+                gemini_messages.append(types.Content(role=g_role, parts=parts))
+
+        return system_instruction, gemini_messages
+
+    async def generate_response(
+        self,
+        input: str | List[Dict[str, Any]],
+        model: str,
+        file_search: bool = False,
+        text_format: Optional[Type[BaseModel]] = None,
+        rag_filter: Optional[Dict[str, str]] = None,
+    ) -> LLMResponse:
+        """
+        Generate a response using Vertex AI Gemini.
+
+        Args:
+            input: String or conversation messages
+            model: Model identifier
+            file_search: If True and rag_corpus_name is set, enables RAG retrieval
+            text_format: Optional Pydantic model for structured output
+            rag_filter: Optional metadata filter for RAG (e.g., {"doctor_id": "uuid"})
+
+        Returns:
+            LLMResponse with text and optional sources
+        """
+        system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
+
+        config_params = {}
+        tools = []
+
+        # RAG via Vertex AI RAG Engine
+        if file_search and self.rag_corpus_name:
+            rag_resource = types.VertexRagStoreRagResource(
+                rag_corpus=self.rag_corpus_name
+            )
+            rag_store_config = types.VertexRagStore(rag_resources=[rag_resource])
+
+            # Add metadata filter if provided
+            if rag_filter:
+                # Build filter conditions for metadata
+                rag_store_config.rag_retrieval_config = types.RagRetrievalConfig(
+                    top_k=5,
+                    filter=types.MetadataFilter(
+                        key=list(rag_filter.keys())[0],
+                        value=list(rag_filter.values())[0],
+                    )
+                    if len(rag_filter) == 1
+                    else None,
+                )
+
+            tools.append(
+                types.Tool(retrieval=types.Retrieval(vertex_rag_store=rag_store_config))
+            )
+            logger.info(f"RAG enabled with corpus: {self.rag_corpus_name}")
+        elif file_search:
+            logger.warning(
+                "file_search=True but no rag_corpus_name configured. "
+                "RAG retrieval disabled."
+            )
+
+        if system_instruction:
+            config_params["system_instruction"] = system_instruction
+
+        if tools:
+            config_params["tools"] = tools
+
+        # Add structured output config for supported models
+        gemini_json_models = ["gemini-3-pro-preview"]
+        if any(model.startswith(m) for m in gemini_json_models):
+            if text_format:
+                config_params["response_mime_type"] = "application/json"
+                config_params["response_json_schema"] = text_format.model_json_schema()
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=256)
+
+        config = types.GenerateContentConfig(**config_params) if config_params else None
+
+        response = await self.client.aio.models.generate_content(
+            model=model, contents=gemini_messages, config=config
+        )
+
+        # Extract sources from grounding metadata if RAG was used
+        sources: List[SourceChunk] = []
+        cited_chunks: List[SourceChunk] = []
+        if file_search and self.rag_corpus_name:
+            try:
+                for candidate in response.candidates:
+                    grounding_meta = getattr(candidate, "grounding_metadata", None)
+                    if grounding_meta:
+                        chunks = getattr(grounding_meta, "grounding_chunks", None) or []
+                        seen_files: set[str] = set()
+                        for chunk in chunks:
+                            retrieved = getattr(chunk, "retrieved_context", None)
+                            if retrieved:
+                                filename = getattr(retrieved, "title", "") or ""
+                                text = getattr(retrieved, "text", "") or ""
+                                file_id = getattr(retrieved, "uri", "") or ""
+
+                                cited_chunks.append(
+                                    SourceChunk(
+                                        file_id=file_id,
+                                        filename=filename,
+                                        text=text,
+                                        score=1.0,
+                                    )
+                                )
+
+                                if filename and filename not in seen_files:
+                                    seen_files.add(filename)
+                                    sources.append(
+                                        SourceChunk(
+                                            file_id=file_id,
+                                            filename=filename,
+                                            text="",
+                                            score=1.0,
+                                        )
+                                    )
+                sources = sources[:3]
+                cited_chunks = cited_chunks[:5]
+            except Exception as e:
+                logger.debug(f"Could not extract sources from RAG response: {e}")
+
+        return LLMResponse(
+            text=response.text,
+            sources=sources if sources else None,
+            cited_chunks=cited_chunks if cited_chunks else None,
+        )
+
+    async def generate_json(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        temperature: float = 0.1,
+        text_format: Optional[Type[BaseModel]] = None,
+    ) -> Dict[str, Any]:
+        """Generate structured JSON response using Vertex AI Gemini."""
+        try:
+            system_instruction, gemini_messages = self._convert_to_gemini_messages(
+                messages
+            )
+
+            config_params = {
+                "temperature": temperature,
+                "response_mime_type": "application/json",
+            }
+            if text_format:
+                config_params["response_json_schema"] = text_format.model_json_schema()
+            if system_instruction:
+                config_params["system_instruction"] = system_instruction
+
+            response = await self.client.aio.models.generate_content(
+                model=model,
+                contents=gemini_messages,
+                config=types.GenerateContentConfig(**config_params),
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            logger.error(f"Vertex AI Gemini JSON generation error: {e}")
+            return {}
+
+    def _build_function_declarations(
+        self, function_tools: List[Dict[str, Any]]
+    ) -> List[types.FunctionDeclaration]:
+        """Convert OpenAI-style function tools to Gemini FunctionDeclarations."""
+        declarations = []
+        for tool in function_tools:
+            if tool.get("type") == "function":
+                func = tool.get("function", {})
+                params = func.get("parameters", {})
+                gemini_params = {}
+                if params.get("properties"):
+                    gemini_params = {
+                        "type": "object",
+                        "properties": params["properties"],
+                        "required": params.get("required", []),
+                    }
+
+                declarations.append(
+                    types.FunctionDeclaration(
+                        name=func.get("name", ""),
+                        description=func.get("description", ""),
+                        parameters=gemini_params if gemini_params else None,
+                    )
+                )
+        return declarations
+
+    def _extract_function_calls(self, response) -> List[Any]:
+        """Extract function calls from Gemini response."""
+        function_calls = []
+        for candidate in response.candidates:
+            if candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    if hasattr(part, "function_call") and part.function_call:
+                        function_calls.append(part.function_call)
+        return function_calls
+
+    async def generate_response_with_tools(
+        self,
+        input: str | List[Dict[str, Any]],
+        model: str,
+        function_tools: List[Dict[str, Any]],
+        tool_executor: Any,
+        temperature: Optional[float] = None,
+    ) -> ToolCallResponse:
+        """Generate response with function calling on Vertex AI."""
+        system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
+
+        function_declarations = self._build_function_declarations(function_tools)
+        tools = (
+            [types.Tool(function_declarations=function_declarations)]
+            if function_declarations
+            else []
+        )
+
+        config = types.GenerateContentConfig(
+            tools=tools if tools else None,
+            system_instruction=system_instruction,
+            thinking_config=types.ThinkingConfig(thinking_level="low")
+            if model.startswith("gemini-3")
+            else None,
+            temperature=temperature,
+        )
+
+        tool_calls_made: List[ToolCall] = []
+
+        response = await self.client.aio.models.generate_content(
+            model=model, contents=gemini_messages, config=config
+        )
+
+        function_calls = self._extract_function_calls(response)
+
+        if function_calls:
+            function_response_parts = []
+            for fc in function_calls:
+                tool_name = fc.name
+                tool_args = dict(fc.args) if fc.args else {}
+                tool_id = f"{tool_name}_{len(tool_calls_made)}"
+
+                tool_calls_made.append(
+                    ToolCall(name=tool_name, arguments=tool_args, id=tool_id)
+                )
+
+                try:
+                    result = await tool_executor(tool_name, tool_args)
+                    result_dict = (
+                        result if isinstance(result, dict) else {"result": result}
+                    )
+                except Exception as e:
+                    logger.error(f"Tool execution error for {tool_name}: {e}")
+                    result_dict = {"error": str(e)}
+
+                function_response_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=tool_name, response=result_dict
+                        )
+                    )
+                )
+
+            if response.candidates and response.candidates[0].content:
+                gemini_messages.append(response.candidates[0].content)
+            gemini_messages.append(
+                types.Content(role="user", parts=function_response_parts)
+            )
+
+            response = await self.client.aio.models.generate_content(
+                model=model, contents=gemini_messages, config=config
+            )
+
+        return ToolCallResponse(
+            text=response.text or "",
+            sources=None,
+            cited_chunks=None,
+            tool_calls=tool_calls_made if tool_calls_made else None,
+        )
+
+
 class LLMServiceRouter:
     """
     Unified LLM service that routes requests to OpenAI or Gemini based on model name.
-    Unified LLM service that routes requests to OpenAI or Gemini based on model name.
 
     Model routing:
-    - Models starting with 'gemini' -> GeminiService
+    - Models starting with 'gemini' -> GeminiService or VertexAIGeminiService
     - All other models -> OpenAIService (default)
+
+    Gemini Provider Options:
+    - use_vertex_ai=False (default): Uses Gemini Developer API with API key.
+      Supports File Search Stores for RAG.
+    - use_vertex_ai=True: Uses Vertex AI with GCP authentication.
+      More GDPR-compliant (data stays in region), better for production.
+      Supports Vertex AI RAG Engine for RAG (set rag_corpus_name).
+
+    File stores are created lazily if file_store_id is not provided (Gemini API only).
     """
 
     def __init__(
         self,
         openai_api_key: str,
-        gemini_api_key: str,
+        gemini_api_key: Optional[str] = None,
         openai_file_store_id: Optional[str] = None,
         gemini_file_store_id: Optional[str] = None,
+        file_store_name: Optional[str] = None,
         default_model: str = "gpt-4o-mini",
+        # Vertex AI options
+        use_vertex_ai: bool = False,
+        vertex_project: Optional[str] = None,
+        vertex_location: str = "europe-west1",
+        rag_corpus_name: Optional[str] = None,
     ):
         self._openai = OpenAIService(
             api_key=openai_api_key,
             file_store_id=openai_file_store_id,
+            file_store_name=file_store_name,
         )
-        self._gemini = GeminiService(
-            api_key=gemini_api_key,
-            file_store_id=gemini_file_store_id,
-        )
+
+        self.use_vertex_ai = use_vertex_ai
+
+        if use_vertex_ai:
+            if not vertex_project:
+                raise ValueError("vertex_project is required when use_vertex_ai=True")
+            self._gemini = VertexAIGeminiService(
+                project=vertex_project,
+                location=vertex_location,
+                rag_corpus_name=rag_corpus_name,
+            )
+            logger.info(
+                f"Using Vertex AI Gemini (project={vertex_project}, "
+                f"location={vertex_location}, rag_corpus={rag_corpus_name})"
+            )
+        else:
+            if not gemini_api_key:
+                raise ValueError("gemini_api_key is required when use_vertex_ai=False")
+            self._gemini = GeminiService(
+                api_key=gemini_api_key,
+                file_store_id=gemini_file_store_id,
+                file_store_name=file_store_name,
+            )
+
         self.default_model = default_model
+
+    @property
+    def openai_file_store_id(self) -> Optional[str]:
+        """Get OpenAI file store ID (may be set after lazy creation)."""
+        return self._openai.file_store_id
+
+    @property
+    def gemini_file_store_id(self) -> Optional[str]:
+        """Get Gemini file store ID (may be set after lazy creation). None if using Vertex AI."""
+        return self._gemini.file_store_id
+
+    @property
+    def rag_corpus_name(self) -> Optional[str]:
+        """Get RAG corpus name (only available when using Vertex AI)."""
+        if self.use_vertex_ai and hasattr(self._gemini, "rag_corpus_name"):
+            return self._gemini.rag_corpus_name
+        return None
 
     def _get_service(self, model: str) -> LLMService:
         """Route to the correct service based on model name."""
@@ -1031,11 +1648,57 @@ class LLMServiceRouter:
         model: Optional[str] = None,
         file_search: bool = False,
         text_format: Optional[Type[BaseModel]] = None,
+        rag_filter: Optional[Dict[str, str]] = None,
     ) -> LLMResponse:
-        """Generate a response using the appropriate service based on model."""
+        """
+        Generate a response using the appropriate service based on model.
+
+        Args:
+            input: String or conversation messages
+            model: Model to use (defaults to default_model)
+            file_search: Enable RAG retrieval
+            text_format: Pydantic model for structured output
+            rag_filter: Metadata filter for RAG (Vertex AI only, e.g. {"doctor_id": "uuid"})
+        """
         model = model or self.default_model
         service = self._get_service(model)
+
+        # Pass rag_filter to Vertex AI service if available
+        if self.use_vertex_ai and model.startswith("gemini") and rag_filter:
+            return await service.generate_response(
+                input, model, file_search, text_format, rag_filter=rag_filter
+            )
         return await service.generate_response(input, model, file_search, text_format)
+
+    # RAG file operations (Vertex AI only)
+    def upload_rag_file(
+        self,
+        file_path: str,
+        display_name: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Upload a file to RAG corpus (Vertex AI only)."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "RAG file upload is only available with Vertex AI"
+            )
+        return self._gemini.upload_rag_file(file_path, display_name, metadata)
+
+    def list_rag_files(self) -> List[Dict[str, Any]]:
+        """List files in RAG corpus (Vertex AI only)."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "RAG file listing is only available with Vertex AI"
+            )
+        return self._gemini.list_rag_files()
+
+    def delete_rag_file(self, file_name: str) -> bool:
+        """Delete a file from RAG corpus (Vertex AI only)."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "RAG file deletion is only available with Vertex AI"
+            )
+        return self._gemini.delete_rag_file(file_name)
 
     async def generate_json(
         self,

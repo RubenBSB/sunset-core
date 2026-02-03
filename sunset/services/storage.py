@@ -1,11 +1,11 @@
-import os
 import logging
-from typing import Optional
+import os
 from datetime import timedelta
+from typing import Optional
 
-from google.cloud import storage
 from google.auth import default
 from google.auth.transport import requests as google_requests
+from google.cloud import storage
 
 from sunset.services.secrets import get_secrets
 

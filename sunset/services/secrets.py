@@ -1,6 +1,6 @@
 import os
-from typing import Optional
 from functools import lru_cache
+from typing import Optional
 
 from google.cloud import secretmanager
 

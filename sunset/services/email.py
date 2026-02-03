@@ -1,8 +1,8 @@
-import logging
 import asyncio
 import email
+import logging
 from email.header import decode_header
-from typing import Optional, Callable, List, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
 
 from aioimaplib import IMAP4_SSL
 
