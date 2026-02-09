@@ -126,8 +126,10 @@ class OpenAIService(LLMService):
         api_key: str,
         file_store_id: Optional[str] = None,
         file_store_name: Optional[str] = None,
+        monitoring: Optional[Any] = None,
     ):
         self.api_key = api_key
+        self.monitoring = monitoring
         super().__init__()
         self.file_store_id = file_store_id
         self.file_store_name = file_store_name or "knowledge-base"
@@ -429,8 +431,10 @@ class GeminiService(LLMService):
         api_key: str,
         file_store_id: Optional[str] = None,
         file_store_name: Optional[str] = None,
+        monitoring: Optional[Any] = None,
     ):
         self.api_key = api_key
+        self.monitoring = monitoring
         super().__init__()
         self.file_store_id = file_store_id
         self.file_store_name = file_store_name or "knowledge-base"
@@ -477,6 +481,26 @@ class GeminiService(LLMService):
         if not hasattr(self, "client"):
             return genai.Client(api_key=self.api_key)
         return self.client
+
+    def _track_tokens(self, response, model: str, method: str, metric_tag: str = ""):
+        """Extract usage_metadata from response and push to Cloud Monitoring."""
+        if not self.monitoring:
+            return
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                self.monitoring.write_token_metric(
+                    model=model,
+                    method=method,
+                    prompt_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                    completion_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    total_tokens=getattr(usage, "total_token_count", 0) or 0,
+                    thinking_tokens=getattr(usage, "thoughts_token_count", 0) or 0,
+                    cached_tokens=getattr(usage, "cached_content_token_count", 0) or 0,
+                    tag=metric_tag,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to track tokens: {e}")
 
     def create_file_store(
         self, store_name: str, initial_files: Optional[List[Dict[str, Any]]] = None
@@ -635,6 +659,7 @@ class GeminiService(LLMService):
         model: str,
         file_search: bool = False,
         text_format: Optional[Type[BaseModel]] = None,
+        metric_tag: str = "",
     ) -> LLMResponse:
         tools = []
         store = await self.get_file_store() if file_search else None
@@ -723,7 +748,7 @@ class GeminiService(LLMService):
 
         # Add structured output config for Gemini when text_format is provided
         # Only supported on certain models (e.g., gemini-2.5-pro-preview)
-        gemini_json_models = ["gemini-3-pro-preview"]
+        gemini_json_models = ["gemini-3"]
         if any(model.startswith(m) for m in gemini_json_models):
             if text_format:
                 config_params["response_mime_type"] = "application/json"
@@ -735,6 +760,7 @@ class GeminiService(LLMService):
         response = await self.client.aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
+        self._track_tokens(response, model, "generate_response", metric_tag)
 
         # Extract sources and cited chunks from grounding metadata
         sources: List[SourceChunk] = []
@@ -792,6 +818,7 @@ class GeminiService(LLMService):
         model: str,
         temperature: float = 0.1,
         text_format: Optional[Type[BaseModel]] = None,
+        metric_tag: str = "",
     ) -> Dict[str, Any]:
         """Generate structured JSON response using Gemini."""
         try:
@@ -824,6 +851,7 @@ class GeminiService(LLMService):
                 contents=gemini_messages,
                 config=types.GenerateContentConfig(**config_params),
             )
+            self._track_tokens(response, model, "generate_json", metric_tag)
             return json.loads(response.text)
         except Exception as e:
             logger.error(f"Gemini JSON generation error: {e}")
@@ -939,6 +967,7 @@ class GeminiService(LLMService):
         function_tools: List[Dict[str, Any]],
         tool_executor: ToolExecutor,
         temperature: Optional[float] = None,
+        metric_tag: str = "",
     ) -> ToolCallResponse:
         """
         Generate a response with function calling support for Gemini.
@@ -1036,6 +1065,8 @@ class GeminiService(LLMService):
                 f"[tools] Final response after tool call - text: {response.text[:200] if response.text else 'None'}"
             )
 
+        self._track_tokens(response, model, "generate_response_with_tools", metric_tag)
+
         # Log if response is empty (helps debug thinking-only responses)
         if not response.text:
             logger.warning(f"Empty response text. Candidates: {response.candidates}")
@@ -1064,10 +1095,12 @@ class VertexAIGeminiService(LLMService):
         project: str,
         location: str = "europe-west1",
         rag_corpus_name: Optional[str] = None,
+        monitoring: Optional[Any] = None,
     ):
         self.project = project
         self.location = location
         self.rag_corpus_name = rag_corpus_name
+        self.monitoring = monitoring
         super().__init__()
         # Vertex AI doesn't support File Search Stores (uses RAG Engine instead)
         self.file_store_id = None
@@ -1082,6 +1115,26 @@ class VertexAIGeminiService(LLMService):
                 location=self.location,
             )
         return self.client
+
+    def _track_tokens(self, response, model: str, method: str, metric_tag: str = ""):
+        """Extract usage_metadata from response and push to Cloud Monitoring."""
+        if not self.monitoring:
+            return
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                self.monitoring.write_token_metric(
+                    model=model,
+                    method=method,
+                    prompt_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                    completion_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    total_tokens=getattr(usage, "total_token_count", 0) or 0,
+                    thinking_tokens=getattr(usage, "thoughts_token_count", 0) or 0,
+                    cached_tokens=getattr(usage, "cached_content_token_count", 0) or 0,
+                    tag=metric_tag,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to track tokens: {e}")
 
     def _ensure_vertexai_init(self):
         """Initialize vertexai SDK if not already done."""
@@ -1144,7 +1197,6 @@ class VertexAIGeminiService(LLMService):
                 corpus_name=self.rag_corpus_name,
                 path=file_path,
                 display_name=display_name,
-                metadata=metadata,
             )
             logger.info(f"Uploaded RAG file: {rag_file.name}")
             return {
@@ -1291,6 +1343,7 @@ class VertexAIGeminiService(LLMService):
         file_search: bool = False,
         text_format: Optional[Type[BaseModel]] = None,
         rag_filter: Optional[Dict[str, str]] = None,
+        metric_tag: str = "",
     ) -> LLMResponse:
         """
         Generate a response using Vertex AI Gemini.
@@ -1341,13 +1394,17 @@ class VertexAIGeminiService(LLMService):
             )
 
         if system_instruction:
-            config_params["system_instruction"] = system_instruction
+            config_params["system_instruction"] = [
+                system_instruction,
+                "VERY IMPORTANT: Keep the overall response super short. It should be like 1-2 sentences max. Like a short human message.",
+                "You have FULL MEMORY of this conversation. NEVER say your memory resets or that you don't remember. Focus your answer on the LAST user message but use conversation history for context.",
+            ]
 
         if tools:
             config_params["tools"] = tools
 
         # Add structured output config for supported models
-        gemini_json_models = ["gemini-3-pro-preview"]
+        gemini_json_models = ["gemini-3"]
         if any(model.startswith(m) for m in gemini_json_models):
             if text_format:
                 config_params["response_mime_type"] = "application/json"
@@ -1356,9 +1413,12 @@ class VertexAIGeminiService(LLMService):
 
         config = types.GenerateContentConfig(**config_params) if config_params else None
 
+        logger.info(f"Generate config {config}")
+        logger.info(f"Model {model}")
         response = await self.client.aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
+        self._track_tokens(response, model, "generate_response", metric_tag)
 
         # Extract sources from grounding metadata if RAG was used
         sources: List[SourceChunk] = []
@@ -1413,6 +1473,7 @@ class VertexAIGeminiService(LLMService):
         model: str,
         temperature: float = 0.1,
         text_format: Optional[Type[BaseModel]] = None,
+        metric_tag: str = "",
     ) -> Dict[str, Any]:
         """Generate structured JSON response using Vertex AI Gemini."""
         try:
@@ -1434,6 +1495,7 @@ class VertexAIGeminiService(LLMService):
                 contents=gemini_messages,
                 config=types.GenerateContentConfig(**config_params),
             )
+            self._track_tokens(response, model, "generate_json", metric_tag)
             return json.loads(response.text)
         except Exception as e:
             logger.error(f"Vertex AI Gemini JSON generation error: {e}")
@@ -1482,6 +1544,7 @@ class VertexAIGeminiService(LLMService):
         function_tools: List[Dict[str, Any]],
         tool_executor: Any,
         temperature: Optional[float] = None,
+        metric_tag: str = "",
     ) -> ToolCallResponse:
         """Generate response with function calling on Vertex AI."""
         system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
@@ -1548,6 +1611,8 @@ class VertexAIGeminiService(LLMService):
                 model=model, contents=gemini_messages, config=config
             )
 
+        self._track_tokens(response, model, "generate_response_with_tools", metric_tag)
+
         return ToolCallResponse(
             text=response.text or "",
             sources=None,
@@ -1587,6 +1652,8 @@ class LLMServiceRouter:
         vertex_project: Optional[str] = None,
         vertex_location: str = "europe-west1",
         rag_corpus_name: Optional[str] = None,
+        # Monitoring
+        monitoring_project: Optional[str] = None,
     ):
         self._openai = OpenAIService(
             api_key=openai_api_key,
@@ -1596,6 +1663,14 @@ class LLMServiceRouter:
 
         self.use_vertex_ai = use_vertex_ai
 
+        # Create monitoring service if a GCP project is available
+        monitoring = None
+        effective_project = monitoring_project or vertex_project
+        if effective_project:
+            from sunset.services.monitoring import MonitoringService
+
+            monitoring = MonitoringService(project=effective_project)
+
         if use_vertex_ai:
             if not vertex_project:
                 raise ValueError("vertex_project is required when use_vertex_ai=True")
@@ -1603,6 +1678,7 @@ class LLMServiceRouter:
                 project=vertex_project,
                 location=vertex_location,
                 rag_corpus_name=rag_corpus_name,
+                monitoring=monitoring,
             )
             logger.info(
                 f"Using Vertex AI Gemini (project={vertex_project}, "
@@ -1615,6 +1691,7 @@ class LLMServiceRouter:
                 api_key=gemini_api_key,
                 file_store_id=gemini_file_store_id,
                 file_store_name=file_store_name,
+                monitoring=monitoring,
             )
 
         self.default_model = default_model
@@ -1649,6 +1726,7 @@ class LLMServiceRouter:
         file_search: bool = False,
         text_format: Optional[Type[BaseModel]] = None,
         rag_filter: Optional[Dict[str, str]] = None,
+        metric_tag: str = "",
     ) -> LLMResponse:
         """
         Generate a response using the appropriate service based on model.
@@ -1659,6 +1737,7 @@ class LLMServiceRouter:
             file_search: Enable RAG retrieval
             text_format: Pydantic model for structured output
             rag_filter: Metadata filter for RAG (Vertex AI only, e.g. {"doctor_id": "uuid"})
+            metric_tag: Custom tag for metric tracking
         """
         model = model or self.default_model
         service = self._get_service(model)
@@ -1666,39 +1745,70 @@ class LLMServiceRouter:
         # Pass rag_filter to Vertex AI service if available
         if self.use_vertex_ai and model.startswith("gemini") and rag_filter:
             return await service.generate_response(
-                input, model, file_search, text_format, rag_filter=rag_filter
+                input,
+                model,
+                file_search,
+                text_format,
+                rag_filter=rag_filter,
+                metric_tag=metric_tag,
             )
-        return await service.generate_response(input, model, file_search, text_format)
+        return await service.generate_response(
+            input, model, file_search, text_format, metric_tag=metric_tag
+        )
 
-    # RAG file operations (Vertex AI only)
+    # File operations (dispatches to Vertex AI RAG or Gemini File Search Store)
+    async def upload_file(
+        self,
+        file_path: str,
+        display_name: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Upload a file to the knowledge store."""
+        if self.use_vertex_ai:
+            return self._gemini.upload_rag_file(file_path, display_name, metadata)
+        return await self._gemini.upload_file_async(file_path, display_name)
+
+    async def list_files(self) -> List[Dict[str, Any]]:
+        """List files in the knowledge store."""
+        if self.use_vertex_ai:
+            return self._gemini.list_rag_files()
+        return await self._gemini.list_files()
+
+    async def delete_file(self, file_name: str) -> bool:
+        """Delete a file from the knowledge store."""
+        if self.use_vertex_ai:
+            return self._gemini.delete_rag_file(file_name)
+        return await self._gemini.delete_file(file_name)
+
+    # Keep old names as sync wrappers for backwards compatibility
     def upload_rag_file(
         self,
         file_path: str,
         display_name: str,
         metadata: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Upload a file to RAG corpus (Vertex AI only)."""
-        if not self.use_vertex_ai:
-            raise NotImplementedError(
-                "RAG file upload is only available with Vertex AI"
-            )
-        return self._gemini.upload_rag_file(file_path, display_name, metadata)
+        """Upload a file (sync). Prefer upload_file() for async code."""
+        if self.use_vertex_ai:
+            return self._gemini.upload_rag_file(file_path, display_name, metadata)
+        import asyncio
+
+        return asyncio.run(self._gemini.upload_file_async(file_path, display_name))
 
     def list_rag_files(self) -> List[Dict[str, Any]]:
-        """List files in RAG corpus (Vertex AI only)."""
-        if not self.use_vertex_ai:
-            raise NotImplementedError(
-                "RAG file listing is only available with Vertex AI"
-            )
-        return self._gemini.list_rag_files()
+        """List files (sync). Prefer list_files() for async code."""
+        if self.use_vertex_ai:
+            return self._gemini.list_rag_files()
+        import asyncio
+
+        return asyncio.run(self._gemini.list_files())
 
     def delete_rag_file(self, file_name: str) -> bool:
-        """Delete a file from RAG corpus (Vertex AI only)."""
-        if not self.use_vertex_ai:
-            raise NotImplementedError(
-                "RAG file deletion is only available with Vertex AI"
-            )
-        return self._gemini.delete_rag_file(file_name)
+        """Delete a file (sync). Prefer delete_file() for async code."""
+        if self.use_vertex_ai:
+            return self._gemini.delete_rag_file(file_name)
+        import asyncio
+
+        return asyncio.run(self._gemini.delete_file(file_name))
 
     async def generate_json(
         self,
@@ -1706,11 +1816,14 @@ class LLMServiceRouter:
         model: Optional[str] = None,
         temperature: float = 0.1,
         text_format: Optional[Type[BaseModel]] = None,
+        metric_tag: str = "",
     ) -> Dict[str, Any]:
         """Generate structured JSON using the appropriate service based on model."""
         model = model or self.default_model
         service = self._get_service(model)
-        return await service.generate_json(messages, model, temperature, text_format)
+        return await service.generate_json(
+            messages, model, temperature, text_format, metric_tag=metric_tag
+        )
 
     async def generate_response_with_tools(
         self,
@@ -1719,6 +1832,7 @@ class LLMServiceRouter:
         function_tools: Optional[List[Dict[str, Any]]] = None,
         tool_executor: Optional[ToolExecutor] = None,
         temperature: Optional[float] = None,
+        metric_tag: str = "",
     ) -> ToolCallResponse:
         """
         Generate a response with function calling support.
@@ -1729,5 +1843,10 @@ class LLMServiceRouter:
         model = model or self.default_model
         service = self._get_service(model)
         return await service.generate_response_with_tools(
-            input, model, function_tools or [], tool_executor, temperature
+            input,
+            model,
+            function_tools or [],
+            tool_executor,
+            temperature,
+            metric_tag=metric_tag,
         )
