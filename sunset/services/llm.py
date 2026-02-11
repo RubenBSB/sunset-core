@@ -1081,31 +1081,40 @@ class GeminiService(LLMService):
 
 class VertexAIGeminiService(LLMService):
     """
-    Vertex AI Gemini implementation for GDPR-compliant, scalable deployments.
+    Vertex AI Gemini implementation with Vertex AI Search (Discovery Engine) for RAG.
 
     Uses Google Cloud authentication (ADC) instead of API key.
-    Data stays within the specified GCP region (e.g., europe-west1 for EU).
+    RAG is supported via Vertex AI Search data stores and grounded generation.
 
-    RAG is supported via Vertex AI RAG Engine when rag_corpus_name is provided.
-    Use file_search=True with rag_filter to query the RAG corpus.
+    Args:
+        project: GCP project ID (for Gemini model calls)
+        project_number: GCP project number (required by Discovery Engine grounded generation)
+        location: GCP region for Gemini model calls (e.g., europe-west1)
+        search_engine_id: Discovery Engine search engine ID (created via Terraform)
+        search_data_store_ids: List of Discovery Engine data store IDs
+        monitoring: Optional monitoring service for token tracking
     """
 
     def __init__(
         self,
         project: str,
+        project_number: str,
         location: str = "europe-west1",
-        rag_corpus_name: Optional[str] = None,
+        search_engine_id: Optional[str] = None,
+        search_data_store_ids: Optional[List[str]] = None,
         monitoring: Optional[Any] = None,
     ):
         self.project = project
+        self.project_number = project_number
         self.location = location
-        self.rag_corpus_name = rag_corpus_name
+        self.search_engine_id = search_engine_id
+        self.search_data_store_ids = search_data_store_ids or []
         self.monitoring = monitoring
         super().__init__()
-        # Vertex AI doesn't support File Search Stores (uses RAG Engine instead)
         self.file_store_id = None
         self._file_store = None
-        self._vertexai_initialized = False
+        self._document_client = None
+        self._search_client = None
 
     def get_client(self):
         if not hasattr(self, "client"):
@@ -1115,6 +1124,22 @@ class VertexAIGeminiService(LLMService):
                 location=self.location,
             )
         return self.client
+
+    def _get_document_client(self):
+        """Lazily create the Discovery Engine DocumentServiceClient."""
+        if self._document_client is None:
+            from google.cloud import discoveryengine_v1 as discoveryengine
+
+            self._document_client = discoveryengine.DocumentServiceClient()
+        return self._document_client
+
+    def _get_search_client(self):
+        """Lazily create the Discovery Engine SearchServiceClient."""
+        if self._search_client is None:
+            from google.cloud import discoveryengine_v1 as discoveryengine
+
+            self._search_client = discoveryengine.SearchServiceClient()
+        return self._search_client
 
     def _track_tokens(self, response, model: str, method: str, metric_tag: str = ""):
         """Extract usage_metadata from response and push to Cloud Monitoring."""
@@ -1136,129 +1161,181 @@ class VertexAIGeminiService(LLMService):
         except Exception as e:
             logger.warning(f"Failed to track tokens: {e}")
 
-    def _ensure_vertexai_init(self):
-        """Initialize vertexai SDK if not already done."""
-        if not self._vertexai_initialized:
-            try:
-                import vertexai
-
-                vertexai.init(project=self.project, location=self.location)
-                self._vertexai_initialized = True
-            except ImportError:
-                raise ImportError(
-                    "google-cloud-aiplatform is required for RAG functions. "
-                    "Install with: pip install google-cloud-aiplatform"
-                )
-
     async def get_file_store(self):
-        """Vertex AI uses RAG Engine instead of File Search Stores."""
-        if self.rag_corpus_name:
-            return {"rag_corpus_name": self.rag_corpus_name}
+        """Returns search engine config if available."""
+        if self.search_engine_id:
+            return {"search_engine_id": self.search_engine_id}
         return None
 
     def create_file_store(
         self, store_name: str, initial_files: Optional[List[Dict[str, Any]]] = None
     ):
-        """Not supported - RAG corpus is created via Terraform."""
+        """Not supported - data stores are created via Terraform."""
         raise NotImplementedError(
-            "RAG corpus should be created via Terraform (sunset provision). "
-            "Set rag_corpus_name in the constructor to use an existing corpus."
+            "Data stores should be created via Terraform (sunset provision). "
+            "Set search_engine_id and search_data_store_ids in the constructor."
         )
 
     def upload_files(self, file_descriptions: List[Dict[str, Any]]):
-        """Not supported - use upload_rag_file instead."""
-        raise NotImplementedError("Use upload_rag_file() for Vertex AI RAG Engine.")
+        """Not supported - use import_documents instead."""
+        raise NotImplementedError(
+            "Use import_documents() for Vertex AI Search data stores."
+        )
 
-    def upload_rag_file(
+    def import_documents(
         self,
-        file_path: str,
-        display_name: str,
+        data_store_id: str,
+        gcs_uri: str,
+    ) -> Dict[str, Any]:
+        """
+        Import documents from GCS into a Vertex AI Search data store.
+
+        Args:
+            data_store_id: The data store ID to import into
+            gcs_uri: GCS URI (e.g., "gs://bucket/path/")
+
+        Returns:
+            Dict with import operation info
+        """
+        from google.cloud import discoveryengine_v1 as discoveryengine
+
+        client = self._get_document_client()
+
+        parent = client.branch_path(
+            project=self.project,
+            location="global",
+            data_store=data_store_id,
+            branch="default_branch",
+        )
+
+        request = discoveryengine.ImportDocumentsRequest(
+            parent=parent,
+            gcs_source=discoveryengine.GcsSource(
+                input_uris=[gcs_uri],
+                data_schema="content",
+            ),
+            reconciliation_mode=discoveryengine.ImportDocumentsRequest.ReconciliationMode.INCREMENTAL,
+        )
+
+        operation = client.import_documents(request=request)
+        response = operation.result()
+
+        logger.info(f"Import completed for data store {data_store_id}")
+        return {
+            "data_store_id": data_store_id,
+            "error_samples": [str(e) for e in (response.error_samples or [])],
+        }
+
+    def create_document(
+        self,
+        data_store_id: str,
+        document_id: str,
+        content: str,
         metadata: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
-        Upload a file to the RAG corpus with optional metadata.
+        Create a single document in a Vertex AI Search data store.
 
         Args:
-            file_path: Local path to the file
-            display_name: Display name for the file in the corpus
-            metadata: Optional metadata dict (e.g., {"doctor_id": "uuid"})
+            data_store_id: The data store ID
+            document_id: Unique document identifier
+            content: Document text content
+            metadata: Optional metadata dict
 
         Returns:
-            Dict with file info including 'name' and 'display_name'
+            Dict with document info
         """
-        if not self.rag_corpus_name:
-            raise ValueError("rag_corpus_name is required for RAG file operations")
+        from google.cloud import discoveryengine_v1 as discoveryengine
 
-        self._ensure_vertexai_init()
-        from vertexai import rag
+        client = self._get_document_client()
 
-        try:
-            rag_file = rag.upload_file(
-                corpus_name=self.rag_corpus_name,
-                path=file_path,
-                display_name=display_name,
-            )
-            logger.info(f"Uploaded RAG file: {rag_file.name}")
-            return {
-                "name": rag_file.name,
-                "display_name": display_name,
-                "metadata": metadata,
-            }
-        except Exception as e:
-            logger.error(f"Failed to upload RAG file: {e}")
-            raise
+        parent = client.branch_path(
+            project=self.project,
+            location="global",
+            data_store=data_store_id,
+            branch="default_branch",
+        )
 
-    def list_rag_files(self) -> List[Dict[str, Any]]:
+        doc_data = {"content": content}
+        if metadata:
+            doc_data.update(metadata)
+
+        document = discoveryengine.Document(
+            json_data=json.dumps(doc_data),
+        )
+
+        request = discoveryengine.CreateDocumentRequest(
+            parent=parent,
+            document_id=document_id,
+            document=document,
+        )
+
+        response = client.create_document(request=request)
+        logger.info(f"Created document {document_id} in data store {data_store_id}")
+        return {
+            "name": response.name,
+            "document_id": document_id,
+            "data_store_id": data_store_id,
+        }
+
+    def list_documents(self, data_store_id: str) -> List[Dict[str, Any]]:
         """
-        List all files in the RAG corpus.
+        List all documents in a Vertex AI Search data store.
+
+        Args:
+            data_store_id: The data store ID
 
         Returns:
-            List of file info dicts
+            List of document info dicts
         """
-        if not self.rag_corpus_name:
-            raise ValueError("rag_corpus_name is required for RAG file operations")
+        from google.cloud import discoveryengine_v1 as discoveryengine
 
-        self._ensure_vertexai_init()
-        from vertexai import rag
+        client = self._get_document_client()
 
-        try:
-            files = list(rag.list_files(corpus_name=self.rag_corpus_name))
-            return [
+        parent = client.branch_path(
+            project=self.project,
+            location="global",
+            data_store=data_store_id,
+            branch="default_branch",
+        )
+
+        request = discoveryengine.ListDocumentsRequest(parent=parent)
+        result = []
+        for doc in client.list_documents(request=request):
+            result.append(
                 {
-                    "name": f.name,
-                    "display_name": getattr(f, "display_name", ""),
-                    "size_bytes": getattr(f, "size_bytes", 0),
-                    "create_time": str(getattr(f, "create_time", "")),
+                    "name": doc.name,
+                    "id": doc.id,
+                    "json_data": doc.json_data if doc.json_data else None,
                 }
-                for f in files
-            ]
-        except Exception as e:
-            logger.error(f"Failed to list RAG files: {e}")
-            raise
+            )
+        return result
 
-    def delete_rag_file(self, file_name: str) -> bool:
+    def delete_document(self, data_store_id: str, document_id: str) -> bool:
         """
-        Delete a file from the RAG corpus.
+        Delete a document from a Vertex AI Search data store.
 
         Args:
-            file_name: Full resource name of the file
+            data_store_id: The data store ID
+            document_id: The document ID to delete
 
         Returns:
             True if deleted successfully
         """
-        if not self.rag_corpus_name:
-            raise ValueError("rag_corpus_name is required for RAG file operations")
+        from google.cloud import discoveryengine_v1 as discoveryengine
 
-        self._ensure_vertexai_init()
-        from vertexai import rag
+        client = self._get_document_client()
 
-        try:
-            rag.delete_file(name=file_name)
-            logger.info(f"Deleted RAG file: {file_name}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete RAG file: {e}")
-            raise
+        name = (
+            f"projects/{self.project}/locations/global"
+            f"/dataStores/{data_store_id}/branches/default_branch"
+            f"/documents/{document_id}"
+        )
+
+        request = discoveryengine.DeleteDocumentRequest(name=name)
+        client.delete_document(request=request)
+        logger.info(f"Deleted document {document_id} from data store {data_store_id}")
+        return True
 
     def _parse_data_url(self, data_url: str) -> tuple[bytes, str]:
         """Parse a data URL and return (bytes, mime_type)."""
@@ -1342,56 +1419,36 @@ class VertexAIGeminiService(LLMService):
         model: str,
         file_search: bool = False,
         text_format: Optional[Type[BaseModel]] = None,
-        rag_filter: Optional[Dict[str, str]] = None,
         metric_tag: str = "",
     ) -> LLMResponse:
         """
-        Generate a response using Vertex AI Gemini.
+        Generate a response using Vertex AI Gemini with optional Vertex AI Search grounding.
+
+        When file_search=True and search_engine_id is configured, uses Discovery Engine
+        grounded generation to ground the response in your search data stores.
 
         Args:
             input: String or conversation messages
             model: Model identifier
-            file_search: If True and rag_corpus_name is set, enables RAG retrieval
+            file_search: If True and search_engine_id is set, enables grounded generation
             text_format: Optional Pydantic model for structured output
-            rag_filter: Optional metadata filter for RAG (e.g., {"doctor_id": "uuid"})
 
         Returns:
             LLMResponse with text and optional sources
         """
+        # If file_search is enabled and we have a search engine, use grounded generation
+        if file_search and self.search_engine_id:
+            return await self._grounded_generate(input, model, metric_tag)
+
+        if file_search and not self.search_engine_id:
+            logger.warning(
+                "file_search=True but no search_engine_id configured. "
+                "Grounded generation disabled."
+            )
+
         system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
 
         config_params = {}
-        tools = []
-
-        # RAG via Vertex AI RAG Engine
-        if file_search and self.rag_corpus_name:
-            rag_resource = types.VertexRagStoreRagResource(
-                rag_corpus=self.rag_corpus_name
-            )
-            rag_store_config = types.VertexRagStore(rag_resources=[rag_resource])
-
-            # Add metadata filter if provided
-            if rag_filter:
-                # Build filter conditions for metadata
-                rag_store_config.rag_retrieval_config = types.RagRetrievalConfig(
-                    top_k=5,
-                    filter=types.MetadataFilter(
-                        key=list(rag_filter.keys())[0],
-                        value=list(rag_filter.values())[0],
-                    )
-                    if len(rag_filter) == 1
-                    else None,
-                )
-
-            tools.append(
-                types.Tool(retrieval=types.Retrieval(vertex_rag_store=rag_store_config))
-            )
-            logger.info(f"RAG enabled with corpus: {self.rag_corpus_name}")
-        elif file_search:
-            logger.warning(
-                "file_search=True but no rag_corpus_name configured. "
-                "RAG retrieval disabled."
-            )
 
         if system_instruction:
             config_params["system_instruction"] = [
@@ -1400,10 +1457,6 @@ class VertexAIGeminiService(LLMService):
                 "You have FULL MEMORY of this conversation. NEVER say your memory resets or that you don't remember. Focus your answer on the LAST user message but use conversation history for context.",
             ]
 
-        if tools:
-            config_params["tools"] = tools
-
-        # Add structured output config for supported models
         gemini_json_models = ["gemini-3"]
         if any(model.startswith(m) for m in gemini_json_models):
             if text_format:
@@ -1413,56 +1466,189 @@ class VertexAIGeminiService(LLMService):
 
         config = types.GenerateContentConfig(**config_params) if config_params else None
 
-        logger.info(f"Generate config {config}")
-        logger.info(f"Model {model}")
         response = await self.client.aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
         self._track_tokens(response, model, "generate_response", metric_tag)
 
-        # Extract sources from grounding metadata if RAG was used
-        sources: List[SourceChunk] = []
-        cited_chunks: List[SourceChunk] = []
-        if file_search and self.rag_corpus_name:
-            try:
-                for candidate in response.candidates:
-                    grounding_meta = getattr(candidate, "grounding_metadata", None)
-                    if grounding_meta:
-                        chunks = getattr(grounding_meta, "grounding_chunks", None) or []
-                        seen_files: set[str] = set()
-                        for chunk in chunks:
-                            retrieved = getattr(chunk, "retrieved_context", None)
-                            if retrieved:
-                                filename = getattr(retrieved, "title", "") or ""
-                                text = getattr(retrieved, "text", "") or ""
-                                file_id = getattr(retrieved, "uri", "") or ""
-
-                                cited_chunks.append(
-                                    SourceChunk(
-                                        file_id=file_id,
-                                        filename=filename,
-                                        text=text,
-                                        score=1.0,
-                                    )
-                                )
-
-                                if filename and filename not in seen_files:
-                                    seen_files.add(filename)
-                                    sources.append(
-                                        SourceChunk(
-                                            file_id=file_id,
-                                            filename=filename,
-                                            text="",
-                                            score=1.0,
-                                        )
-                                    )
-                sources = sources[:3]
-                cited_chunks = cited_chunks[:5]
-            except Exception as e:
-                logger.debug(f"Could not extract sources from RAG response: {e}")
-
         return LLMResponse(
             text=response.text,
+            sources=None,
+            cited_chunks=None,
+        )
+
+    async def _grounded_generate(
+        self,
+        input: str | List[Dict[str, Any]],
+        model: str,
+        metric_tag: str = "",
+    ) -> LLMResponse:
+        """
+        Generate a grounded response using Discovery Engine GroundedGenerationService.
+
+        Calls Gemini with Vertex AI Search data stores as a grounding source.
+        The model queries the data stores and generates a grounded answer with citations.
+        """
+        from google.cloud import discoveryengine_v1 as discoveryengine
+
+        client = discoveryengine.GroundedGenerationServiceClient()
+
+        # Build contents from input
+        system_text = None
+        contents = []
+
+        if isinstance(input, str):
+            contents.append(
+                discoveryengine.GroundedGenerationContent(
+                    role="user",
+                    parts=[discoveryengine.GroundedGenerationContent.Part(text=input)],
+                )
+            )
+        else:
+            for msg in input:
+                role = msg.get("role")
+                content = msg.get("content")
+
+                if role in ("system", "developer"):
+                    text = (
+                        content
+                        if isinstance(content, str)
+                        else (
+                            content[0].get("text")
+                            if isinstance(content, list) and content
+                            else None
+                        )
+                    )
+                    if text:
+                        system_text = (
+                            f"{system_text}\n\n{text}" if system_text else text
+                        )
+                    continue
+
+                text = (
+                    content
+                    if isinstance(content, str)
+                    else (
+                        content[0].get("text")
+                        if isinstance(content, list) and content
+                        else ""
+                    )
+                )
+                if not text:
+                    continue
+
+                grounded_role = "model" if role == "assistant" else "user"
+                contents.append(
+                    discoveryengine.GroundedGenerationContent(
+                        role=grounded_role,
+                        parts=[
+                            discoveryengine.GroundedGenerationContent.Part(text=text)
+                        ],
+                    )
+                )
+
+        serving_config = (
+            f"projects/{self.project_number}/locations/global"
+            f"/collections/default_collection"
+            f"/engines/{self.search_engine_id}"
+            f"/servingConfigs/default_search"
+        )
+
+        system_parts = []
+        if system_text:
+            system_parts.append(
+                discoveryengine.GroundedGenerationContent.Part(text=system_text)
+            )
+        system_parts.append(
+            discoveryengine.GroundedGenerationContent.Part(
+                text="Answer based on the provided data sources. Cite your sources. "
+                "Keep the overall response short, like 1-2 sentences max."
+            )
+        )
+
+        request = discoveryengine.GenerateGroundedContentRequest(
+            location=f"projects/{self.project_number}/locations/global",
+            generation_spec=discoveryengine.GenerateGroundedContentRequest.GenerationSpec(
+                model_id=model,
+            ),
+            contents=contents,
+            system_instruction=discoveryengine.GroundedGenerationContent(
+                parts=system_parts,
+            ),
+            grounding_spec=discoveryengine.GenerateGroundedContentRequest.GroundingSpec(
+                grounding_sources=[
+                    discoveryengine.GenerateGroundedContentRequest.GroundingSource(
+                        search_source=discoveryengine.GenerateGroundedContentRequest.GroundingSource.SearchSource(
+                            serving_config=serving_config,
+                        ),
+                    ),
+                ],
+            ),
+        )
+
+        response = client.generate_grounded_content(request)
+
+        # Extract text from response
+        response_text = ""
+        if response.candidates:
+            candidate = response.candidates[0]
+            if candidate.content and candidate.content.parts:
+                response_text = "".join(
+                    part.text for part in candidate.content.parts if part.text
+                )
+
+        # Extract sources and cited chunks from grounding metadata
+        sources: List[SourceChunk] = []
+        cited_chunks: List[SourceChunk] = []
+        try:
+            if response.candidates:
+                candidate = response.candidates[0]
+                grounding_meta = getattr(candidate, "grounding_metadata", None)
+                if grounding_meta:
+                    support_chunks = (
+                        getattr(grounding_meta, "support_chunks", None) or []
+                    )
+                    seen_files: set[str] = set()
+                    for chunk in support_chunks:
+                        source = getattr(chunk, "chunk_text", "") or ""
+                        doc_name = ""
+                        doc_uri = ""
+                        doc_metadata = getattr(chunk, "source", None)
+                        if doc_metadata:
+                            doc_name = getattr(doc_metadata, "title", "") or ""
+                            doc_uri = getattr(doc_metadata, "uri", "") or ""
+
+                        cited_chunks.append(
+                            SourceChunk(
+                                file_id=doc_uri,
+                                filename=doc_name,
+                                text=source,
+                                score=1.0,
+                            )
+                        )
+
+                        if doc_name and doc_name not in seen_files:
+                            seen_files.add(doc_name)
+                            sources.append(
+                                SourceChunk(
+                                    file_id=doc_uri,
+                                    filename=doc_name,
+                                    text="",
+                                    score=1.0,
+                                )
+                            )
+            sources = sources[:3]
+            cited_chunks = cited_chunks[:5]
+        except Exception as e:
+            logger.debug(f"Could not extract sources from grounded response: {e}")
+
+        logger.info(
+            f"Grounded generation completed. Sources: {len(sources)}, "
+            f"Cited chunks: {len(cited_chunks)}"
+        )
+
+        return LLMResponse(
+            text=response_text,
             sources=sources if sources else None,
             cited_chunks=cited_chunks if cited_chunks else None,
         )
@@ -1633,8 +1819,8 @@ class LLMServiceRouter:
     - use_vertex_ai=False (default): Uses Gemini Developer API with API key.
       Supports File Search Stores for RAG.
     - use_vertex_ai=True: Uses Vertex AI with GCP authentication.
-      More GDPR-compliant (data stays in region), better for production.
-      Supports Vertex AI RAG Engine for RAG (set rag_corpus_name).
+      Uses Vertex AI Search (Discovery Engine) for RAG via grounded generation.
+      Set search_engine_id and search_data_store_ids for file search.
 
     File stores are created lazily if file_store_id is not provided (Gemini API only).
     """
@@ -1650,8 +1836,10 @@ class LLMServiceRouter:
         # Vertex AI options
         use_vertex_ai: bool = False,
         vertex_project: Optional[str] = None,
+        vertex_project_number: Optional[str] = None,
         vertex_location: str = "europe-west1",
-        rag_corpus_name: Optional[str] = None,
+        search_engine_id: Optional[str] = None,
+        search_data_store_ids: Optional[List[str]] = None,
         # Monitoring
         monitoring_project: Optional[str] = None,
     ):
@@ -1674,15 +1862,21 @@ class LLMServiceRouter:
         if use_vertex_ai:
             if not vertex_project:
                 raise ValueError("vertex_project is required when use_vertex_ai=True")
+            if not vertex_project_number:
+                raise ValueError(
+                    "vertex_project_number is required when use_vertex_ai=True"
+                )
             self._gemini = VertexAIGeminiService(
                 project=vertex_project,
+                project_number=vertex_project_number,
                 location=vertex_location,
-                rag_corpus_name=rag_corpus_name,
+                search_engine_id=search_engine_id,
+                search_data_store_ids=search_data_store_ids,
                 monitoring=monitoring,
             )
             logger.info(
                 f"Using Vertex AI Gemini (project={vertex_project}, "
-                f"location={vertex_location}, rag_corpus={rag_corpus_name})"
+                f"location={vertex_location}, search_engine={search_engine_id})"
             )
         else:
             if not gemini_api_key:
@@ -1707,11 +1901,18 @@ class LLMServiceRouter:
         return self._gemini.file_store_id
 
     @property
-    def rag_corpus_name(self) -> Optional[str]:
-        """Get RAG corpus name (only available when using Vertex AI)."""
-        if self.use_vertex_ai and hasattr(self._gemini, "rag_corpus_name"):
-            return self._gemini.rag_corpus_name
+    def search_engine_id(self) -> Optional[str]:
+        """Get search engine ID (only available when using Vertex AI)."""
+        if self.use_vertex_ai and hasattr(self._gemini, "search_engine_id"):
+            return self._gemini.search_engine_id
         return None
+
+    @property
+    def search_data_store_ids(self) -> List[str]:
+        """Get search data store IDs (only available when using Vertex AI)."""
+        if self.use_vertex_ai and hasattr(self._gemini, "search_data_store_ids"):
+            return self._gemini.search_data_store_ids
+        return []
 
     def _get_service(self, model: str) -> LLMService:
         """Route to the correct service based on model name."""
@@ -1725,7 +1926,6 @@ class LLMServiceRouter:
         model: Optional[str] = None,
         file_search: bool = False,
         text_format: Optional[Type[BaseModel]] = None,
-        rag_filter: Optional[Dict[str, str]] = None,
         metric_tag: str = "",
     ) -> LLMResponse:
         """
@@ -1734,81 +1934,88 @@ class LLMServiceRouter:
         Args:
             input: String or conversation messages
             model: Model to use (defaults to default_model)
-            file_search: Enable RAG retrieval
+            file_search: Enable RAG retrieval (Vertex AI Search grounded generation or file search)
             text_format: Pydantic model for structured output
-            rag_filter: Metadata filter for RAG (Vertex AI only, e.g. {"doctor_id": "uuid"})
             metric_tag: Custom tag for metric tracking
         """
         model = model or self.default_model
         service = self._get_service(model)
-
-        # Pass rag_filter to Vertex AI service if available
-        if self.use_vertex_ai and model.startswith("gemini") and rag_filter:
-            return await service.generate_response(
-                input,
-                model,
-                file_search,
-                text_format,
-                rag_filter=rag_filter,
-                metric_tag=metric_tag,
-            )
         return await service.generate_response(
             input, model, file_search, text_format, metric_tag=metric_tag
         )
 
-    # File operations (dispatches to Vertex AI RAG or Gemini File Search Store)
+    # File operations (dispatches to Vertex AI Search or Gemini File Search Store)
     async def upload_file(
         self,
         file_path: str,
         display_name: str,
-        metadata: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Upload a file to the knowledge store."""
+        """Upload a file to the knowledge store (Gemini API only)."""
         if self.use_vertex_ai:
-            return self._gemini.upload_rag_file(file_path, display_name, metadata)
+            raise NotImplementedError(
+                "For Vertex AI Search, use import_documents() or create_document() instead."
+            )
         return await self._gemini.upload_file_async(file_path, display_name)
 
+    def import_documents(
+        self,
+        data_store_id: str,
+        gcs_uri: str,
+    ) -> Dict[str, Any]:
+        """Import documents from GCS into a Vertex AI Search data store."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "import_documents() is only available with Vertex AI Search."
+            )
+        return self._gemini.import_documents(data_store_id, gcs_uri)
+
+    def create_document(
+        self,
+        data_store_id: str,
+        document_id: str,
+        content: str,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Create a single document in a Vertex AI Search data store."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "create_document() is only available with Vertex AI Search."
+            )
+        return self._gemini.create_document(
+            data_store_id, document_id, content, metadata
+        )
+
+    def list_documents(self, data_store_id: str) -> List[Dict[str, Any]]:
+        """List documents in a Vertex AI Search data store."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "list_documents() is only available with Vertex AI Search."
+            )
+        return self._gemini.list_documents(data_store_id)
+
+    def delete_document(self, data_store_id: str, document_id: str) -> bool:
+        """Delete a document from a Vertex AI Search data store."""
+        if not self.use_vertex_ai:
+            raise NotImplementedError(
+                "delete_document() is only available with Vertex AI Search."
+            )
+        return self._gemini.delete_document(data_store_id, document_id)
+
     async def list_files(self) -> List[Dict[str, Any]]:
-        """List files in the knowledge store."""
+        """List files in the knowledge store (Gemini API only)."""
         if self.use_vertex_ai:
-            return self._gemini.list_rag_files()
+            raise NotImplementedError(
+                "For Vertex AI Search, use list_documents(data_store_id) instead."
+            )
         return await self._gemini.list_files()
 
     async def delete_file(self, file_name: str) -> bool:
-        """Delete a file from the knowledge store."""
+        """Delete a file from the knowledge store (Gemini API only)."""
         if self.use_vertex_ai:
-            return self._gemini.delete_rag_file(file_name)
+            raise NotImplementedError(
+                "For Vertex AI Search, use delete_document(data_store_id, document_id) instead."
+            )
         return await self._gemini.delete_file(file_name)
-
-    # Keep old names as sync wrappers for backwards compatibility
-    def upload_rag_file(
-        self,
-        file_path: str,
-        display_name: str,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """Upload a file (sync). Prefer upload_file() for async code."""
-        if self.use_vertex_ai:
-            return self._gemini.upload_rag_file(file_path, display_name, metadata)
-        import asyncio
-
-        return asyncio.run(self._gemini.upload_file_async(file_path, display_name))
-
-    def list_rag_files(self) -> List[Dict[str, Any]]:
-        """List files (sync). Prefer list_files() for async code."""
-        if self.use_vertex_ai:
-            return self._gemini.list_rag_files()
-        import asyncio
-
-        return asyncio.run(self._gemini.list_files())
-
-    def delete_rag_file(self, file_name: str) -> bool:
-        """Delete a file (sync). Prefer delete_file() for async code."""
-        if self.use_vertex_ai:
-            return self._gemini.delete_rag_file(file_name)
-        import asyncio
-
-        return asyncio.run(self._gemini.delete_file(file_name))
 
     async def generate_json(
         self,
