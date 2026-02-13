@@ -11,6 +11,7 @@ __all__ = [
     "LLMService",
     "MonitoringService",
     "RetrievalService",
+    "ChatService",
 ]
 
 
@@ -56,4 +57,8 @@ def __getattr__(name: str):
         from sunset.services.retrieval import RetrievalService
 
         return RetrievalService
+    if name == "ChatService":
+        from sunset.services.chat import ChatService
+
+        return ChatService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

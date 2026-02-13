@@ -15,10 +15,10 @@ Usage:
     token = auth.create_token(user_id="123", extra_claims={"role": "admin"})
     payload = auth.verify_token(token)
 
-    # Refresh tokens (requires SQLAlchemy session + RefreshToken model)
-    raw, db_row = auth.create_refresh_token(user_id="123", session=db)
-    new_access, new_refresh = auth.rotate_refresh_token(raw, session=db)
-    auth.revoke_refresh_token(raw, session=db)
+    # Refresh tokens (requires AsyncSession + RefreshToken model)
+    raw, db_row = await auth.create_refresh_token(user_id="123", session=db)
+    new_access, new_refresh = await auth.rotate_refresh_token(raw, session=db)
+    await auth.revoke_refresh_token(raw, session=db)
 
     # Cookie helpers (for FastAPI/Starlette responses)
     auth.set_refresh_cookie(response, raw)
@@ -40,6 +40,7 @@ from typing import Any, Optional
 import argon2
 import pyotp
 from jose import JWTError, jwt
+from sqlalchemy import select, update
 
 logger = logging.getLogger(__name__)
 
@@ -176,12 +177,12 @@ class AuthService:
                 "refresh_token_model must be set on AuthService to use refresh tokens"
             )
 
-    def create_refresh_token(self, user_id: str, session: Any) -> tuple:
+    async def create_refresh_token(self, user_id: str, session: Any) -> tuple:
         """Create a new refresh token stored in the database.
 
         Args:
             user_id: The user's ID
-            session: SQLAlchemy session
+            session: AsyncSession
 
         Returns:
             (raw_token, db_record) — raw_token goes into the cookie,
@@ -202,10 +203,10 @@ class AuthService:
             expires_at=expires_at,
         )
         session.add(db_token)
-        session.commit()
+        await session.commit()
         return raw_token, db_token
 
-    def rotate_refresh_token(self, raw_token: str, session: Any) -> tuple:
+    async def rotate_refresh_token(self, raw_token: str, session: Any) -> tuple:
         """Validate and rotate a refresh token.
 
         Implements automatic reuse detection: if a revoked token is presented,
@@ -213,7 +214,7 @@ class AuthService:
 
         Args:
             raw_token: The raw refresh token from the cookie
-            session: SQLAlchemy session
+            session: AsyncSession
 
         Returns:
             (new_access_token, new_raw_refresh_token)
@@ -225,14 +226,17 @@ class AuthService:
         Model = self.refresh_token_model
 
         token_hash = self._hash_refresh_token(raw_token)
-        db_token = session.query(Model).filter(Model.token_hash == token_hash).first()
+        result = await session.execute(
+            select(Model).where(Model.token_hash == token_hash)
+        )
+        db_token = result.scalar_one_or_none()
 
         if not db_token:
             raise ValueError("Invalid refresh token")
 
         # Reuse detection
         if db_token.revoked:
-            self._revoke_family(db_token.user_id, session)
+            await self._revoke_family(db_token.user_id, session)
             raise ValueError("Refresh token reuse detected — all sessions revoked")
 
         if db_token.expires_at < datetime.now(timezone.utc):
@@ -244,37 +248,43 @@ class AuthService:
         db_token.revoked = True
 
         # Issue new pair
-        new_raw_refresh, new_db_token = self.create_refresh_token(user_id, session)
+        new_raw_refresh, new_db_token = await self.create_refresh_token(
+            user_id, session
+        )
         db_token.replaced_by = new_db_token.id
-        session.commit()
+        await session.commit()
 
         new_access_token = self.create_token(user_id=user_id)
         return new_access_token, new_raw_refresh
 
-    def revoke_refresh_token(self, raw_token: str, session: Any):
+    async def revoke_refresh_token(self, raw_token: str, session: Any):
         """Revoke a single refresh token (for logout)."""
         self._ensure_refresh_model()
         Model = self.refresh_token_model
 
         token_hash = self._hash_refresh_token(raw_token)
-        db_token = session.query(Model).filter(Model.token_hash == token_hash).first()
+        result = await session.execute(
+            select(Model).where(Model.token_hash == token_hash)
+        )
+        db_token = result.scalar_one_or_none()
         if db_token:
             db_token.revoked = True
-            session.commit()
+            await session.commit()
 
-    def revoke_all_user_tokens(self, user_id: str, session: Any):
+    async def revoke_all_user_tokens(self, user_id: str, session: Any):
         """Revoke all refresh tokens for a user."""
         self._ensure_refresh_model()
-        self._revoke_family(user_id, session)
+        await self._revoke_family(user_id, session)
 
-    def _revoke_family(self, user_id, session: Any):
+    async def _revoke_family(self, user_id, session: Any):
         """Revoke all active refresh tokens for a user."""
         Model = self.refresh_token_model
-        session.query(Model).filter(
-            Model.user_id == user_id,
-            not Model.revoked,
-        ).update({"revoked": True})
-        session.commit()
+        await session.execute(
+            update(Model)
+            .where(Model.user_id == user_id, not Model.revoked)
+            .values(revoked=True)
+        )
+        await session.commit()
 
     # =========================================================================
     # Refresh Token Cookie Helpers

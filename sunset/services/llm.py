@@ -21,33 +21,55 @@ class SourceChunk(TypedDict):
     score: float
 
 
-class LLMResponse(TypedDict):
-    text: str
-    sources: Optional[
-        List[SourceChunk]
-    ]  # Top 3 distinct files for display (score > 60%)
-    cited_chunks: Optional[
-        List[SourceChunk]
-    ]  # Chunks with text from actually cited files (for evaluation)
-
-
 class ToolCall(TypedDict):
     name: str
     arguments: Dict[str, Any]
     id: str
 
 
-class ToolCallResponse(TypedDict):
+class LLMResponse(TypedDict):
     text: str
-    sources: Optional[List[SourceChunk]]
-    cited_chunks: Optional[
-        List[SourceChunk]
-    ]  # Chunks with text from actually cited files (for evaluation)
-    tool_calls: Optional[List[ToolCall]]  # Tool calls that were made (for logging)
+    cited_chunks: Optional[List[SourceChunk]]
+    tool_calls: Optional[List[ToolCall]]
 
+
+# Deprecated alias — use LLMResponse instead
+ToolCallResponse = LLMResponse
 
 # Type for tool executor callback
 ToolExecutor = Any  # Callable[[str, Dict[str, Any]], Any]
+
+
+class _FileSearchSentinel:
+    """Sentinel to enable file search / RAG in generate_response.
+
+    Usage:
+        from sunset.services.llm import file_search
+        await llm.generate_response(input=msgs, model="gemini-2.5-flash", function_tools=[file_search])
+    """
+
+    def __repr__(self):
+        return "file_search"
+
+
+file_search = _FileSearchSentinel()
+_FILE_SEARCH = file_search  # Internal ref to avoid shadowing by parameter names
+
+
+def _split_tools(
+    function_tools: Optional[List[Any]],
+) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Separate file_search sentinel from regular tool dicts."""
+    if not function_tools:
+        return False, []
+    has_fs = False
+    regular: List[Dict[str, Any]] = []
+    for t in function_tools:
+        if isinstance(t, _FileSearchSentinel):
+            has_fs = True
+        else:
+            regular.append(t)
+    return has_fs, regular
 
 
 class LLMService(ABC):
@@ -78,20 +100,26 @@ class LLMService(ABC):
         self,
         input: str | List[Dict[str, Any]],
         model: str,
-        file_search: bool = False,
+        function_tools: Optional[List[Any]] = None,
+        tool_executor: Optional[ToolExecutor] = None,
         text_format: Optional[Type[BaseModel]] = None,
+        temperature: Optional[float] = None,
+        metric_tag: str = "",
     ) -> LLMResponse:
         """
-        Generate a response based on the conversation history or input string.
+        Generate a response, optionally with tool calling and/or file search.
 
         Args:
             input: String or List of message dicts with 'role' and 'content'.
             model: Model identifier.
-            file_search: Whether to enable file search capabilities.
-            text_format: Optional Pydantic model for structured output (OpenAI only).
+            function_tools: List of tool dicts and/or the file_search sentinel.
+            tool_executor: Async callback (name, args) -> result for custom tools.
+            text_format: Optional Pydantic model for structured output.
+            temperature: Sampling temperature.
+            metric_tag: Custom tag for metric tracking.
 
         Returns:
-            LLMResponse with text and optional sources list.
+            LLMResponse with text, optional sources, and optional tool_calls.
         """
         raise NotImplementedError("Subclasses must implement this method")
 
@@ -127,9 +155,11 @@ class OpenAIService(LLMService):
         file_store_id: Optional[str] = None,
         file_store_name: Optional[str] = None,
         monitoring: Optional[Any] = None,
+        retrieval: Optional[Any] = None,
     ):
         self.api_key = api_key
         self.monitoring = monitoring
+        self.retrieval = retrieval
         super().__init__()
         self.file_store_id = file_store_id
         self.file_store_name = file_store_name or "knowledge-base"
@@ -201,17 +231,21 @@ class OpenAIService(LLMService):
         self,
         input: str | List[Dict[str, Any]],
         model: str,
-        file_search: bool = False,
+        function_tools: Optional[List[Any]] = None,
+        tool_executor: Optional[ToolExecutor] = None,
         text_format: Optional[Type[BaseModel]] = None,
+        temperature: Optional[float] = None,
+        metric_tag: str = "",
     ) -> LLMResponse:
+        has_file_search, regular_tools = _split_tools(function_tools)
+
         tools = []
         reasoning = None
         include = []
 
-        # Lazily retrieve file store if file_search is requested
-        store = await self.get_file_store() if file_search else None
-
-        if file_search and store:
+        # File search setup
+        store = await self.get_file_store() if has_file_search else None
+        if has_file_search and store:
             tools.append(
                 {
                     "type": "file_search",
@@ -225,7 +259,78 @@ class OpenAIService(LLMService):
             )
             include = ["output[*].file_search_call.search_results"]
 
-        # Use responses.parse for structured output, responses.create otherwise
+        # Add custom function tools
+        tools.extend(regular_tools)
+
+        # Tool-calling loop when custom tools are present
+        if regular_tools and tool_executor:
+            conversation = (
+                input
+                if isinstance(input, list)
+                else [{"role": "user", "content": input}]
+            )
+            tool_calls_made: List[ToolCall] = []
+            max_iterations = 3
+
+            for _ in range(max_iterations):
+                response = await self.client.responses.create(
+                    model=model,
+                    input=conversation,
+                    tools=tools if tools else None,
+                    include=include if include else None,
+                )
+
+                function_calls = [
+                    item
+                    for item in response.output
+                    if getattr(item, "type", None) == "function_call"
+                ]
+
+                if not function_calls:
+                    break
+
+                for fc in function_calls:
+                    tool_name = fc.name
+                    tool_args = (
+                        json.loads(fc.arguments)
+                        if isinstance(fc.arguments, str)
+                        else fc.arguments
+                    )
+                    tool_id = fc.call_id
+
+                    tool_calls_made.append(
+                        ToolCall(name=tool_name, arguments=tool_args, id=tool_id)
+                    )
+
+                    try:
+                        result = await tool_executor(tool_name, tool_args)
+                        result_str = (
+                            json.dumps(result)
+                            if not isinstance(result, str)
+                            else result
+                        )
+                    except Exception as e:
+                        logger.error(f"Tool execution error for {tool_name}: {e}")
+                        result_str = json.dumps({"error": str(e)})
+
+                    conversation = response.output + [
+                        {
+                            "type": "function_call_output",
+                            "call_id": tool_id,
+                            "output": result_str,
+                        }
+                    ]
+
+            cited_chunks = (
+                self._extract_file_search_sources(response) if has_file_search else []
+            )
+            return LLMResponse(
+                text=response.output_text,
+                cited_chunks=cited_chunks if cited_chunks else None,
+                tool_calls=tool_calls_made if tool_calls_made else None,
+            )
+
+        # Simple generation (possibly with file_search only)
         if text_format:
             response = await self.client.responses.parse(
                 model=model,
@@ -246,68 +351,11 @@ class OpenAIService(LLMService):
                 tool_choice="required" if tools else None,
             )
 
-        # Extract sources and cited chunks from file search results
-        sources: List[SourceChunk] = []
+        # Extract cited chunks from file search results
         cited_chunks: List[SourceChunk] = []
-        if file_search:
-            try:
-                # 1. Extract cited file_ids from annotations
-                cited_file_ids = set()
-                for item in response.output:
-                    if hasattr(item, "content") and item.content:
-                        for content_part in item.content:
-                            if (
-                                hasattr(content_part, "annotations")
-                                and content_part.annotations
-                            ):
-                                for annotation in content_part.annotations:
-                                    cited_file_ids.add(annotation.file_id)
+        if has_file_search:
+            cited_chunks = self._extract_file_search_sources(response)
 
-                # 2. Collect all file search results
-                file_scores: dict[str, SourceChunk] = {}
-                all_chunks: List[SourceChunk] = []
-                for item in response.output:
-                    if getattr(item, "type", None) == "file_search_call":
-                        results = getattr(item, "results", None)
-                        if results:
-                            for chunk in results:
-                                # Collect cited chunks with text for evaluation
-                                if chunk.file_id in cited_file_ids:
-                                    all_chunks.append(
-                                        SourceChunk(
-                                            file_id=chunk.file_id,
-                                            filename=chunk.filename,
-                                            text=chunk.text,
-                                            score=chunk.score,
-                                        )
-                                    )
-
-                                # Skip files with score < 60% for display sources
-                                if chunk.score < 0.6:
-                                    continue
-                                # Keep best score per file for display
-                                if (
-                                    chunk.filename not in file_scores
-                                    or chunk.score
-                                    > file_scores[chunk.filename]["score"]
-                                ):
-                                    file_scores[chunk.filename] = SourceChunk(
-                                        file_id=chunk.file_id,
-                                        filename=chunk.filename,
-                                        text="",
-                                        score=chunk.score,
-                                    )
-
-                # 3. Sort and limit results
-                sources = sorted(
-                    file_scores.values(), key=lambda x: x["score"], reverse=True
-                )[:3]
-                all_chunks.sort(key=lambda x: x["score"], reverse=True)
-                cited_chunks = all_chunks[:5]  # Top 5 cited chunks for evaluation
-            except Exception as e:
-                logger.debug(f"Could not extract sources from response: {e}")
-
-        # When using text_format, serialize the parsed output to JSON
         if (
             text_format
             and hasattr(response, "output_parsed")
@@ -319,9 +367,45 @@ class OpenAIService(LLMService):
 
         return LLMResponse(
             text=output_text,
-            sources=sources if sources else None,
             cited_chunks=cited_chunks if cited_chunks else None,
+            tool_calls=None,
         )
+
+    def _extract_file_search_sources(self, response) -> List[SourceChunk]:
+        """Extract cited chunks from OpenAI file search results."""
+        try:
+            cited_file_ids = set()
+            for item in response.output:
+                if hasattr(item, "content") and item.content:
+                    for content_part in item.content:
+                        if (
+                            hasattr(content_part, "annotations")
+                            and content_part.annotations
+                        ):
+                            for annotation in content_part.annotations:
+                                cited_file_ids.add(annotation.file_id)
+
+            all_chunks: List[SourceChunk] = []
+            for item in response.output:
+                if getattr(item, "type", None) == "file_search_call":
+                    results = getattr(item, "results", None)
+                    if results:
+                        for chunk in results:
+                            if chunk.file_id in cited_file_ids:
+                                all_chunks.append(
+                                    SourceChunk(
+                                        file_id=chunk.file_id,
+                                        filename=chunk.filename,
+                                        text=chunk.text,
+                                        score=chunk.score,
+                                    )
+                                )
+
+            all_chunks.sort(key=lambda x: x["score"], reverse=True)
+            return all_chunks[:5]
+        except Exception as e:
+            logger.debug(f"Could not extract sources from response: {e}")
+            return []
 
     async def generate_json(
         self,
@@ -342,85 +426,6 @@ class OpenAIService(LLMService):
         except Exception as e:
             logger.error(f"OpenAI JSON generation error: {e}")
             return {}
-
-    async def generate_response_with_tools(
-        self,
-        input: str | List[Dict[str, Any]],
-        model: str,
-        function_tools: List[Dict[str, Any]],
-        tool_executor: ToolExecutor,
-    ) -> ToolCallResponse:
-        """
-        Generate a response with function calling support.
-
-        Handles function tools only. For file search with citations, use generate_response first.
-        """
-        tools = list(function_tools)  # Copy to avoid mutation
-
-        # Build conversation for multi-turn tool calling
-        conversation = (
-            input if isinstance(input, list) else [{"role": "user", "content": input}]
-        )
-        tool_calls_made: List[ToolCall] = []
-        max_iterations = 3  # Prevent infinite loops
-
-        for _ in range(max_iterations):
-            response = await self.client.responses.create(
-                model=model,
-                input=conversation,
-                tools=tools if tools else None,
-            )
-
-            # Check for function calls in output
-            function_calls = [
-                item
-                for item in response.output
-                if getattr(item, "type", None) == "function_call"
-            ]
-
-            if not function_calls:
-                # No more tool calls, we have the final response
-                break
-
-            # Process each function call
-            for fc in function_calls:
-                tool_name = fc.name
-                tool_args = (
-                    json.loads(fc.arguments)
-                    if isinstance(fc.arguments, str)
-                    else fc.arguments
-                )
-                tool_id = fc.call_id
-
-                tool_calls_made.append(
-                    ToolCall(name=tool_name, arguments=tool_args, id=tool_id)
-                )
-
-                # Execute the tool (supports async executors)
-                try:
-                    result = await tool_executor(tool_name, tool_args)
-                    result_str = (
-                        json.dumps(result) if not isinstance(result, str) else result
-                    )
-                except Exception as e:
-                    logger.error(f"Tool execution error for {tool_name}: {e}")
-                    result_str = json.dumps({"error": str(e)})
-
-                # Add to conversation for next iteration
-                conversation = response.output + [
-                    {
-                        "type": "function_call_output",
-                        "call_id": tool_id,
-                        "output": result_str,
-                    }
-                ]
-
-        return ToolCallResponse(
-            text=response.output_text,
-            sources=None,
-            cited_chunks=None,
-            tool_calls=tool_calls_made if tool_calls_made else None,
-        )
 
 
 class GeminiService(LLMService):
@@ -657,14 +662,24 @@ class GeminiService(LLMService):
         self,
         input: str | List[Dict[str, Any]],
         model: str,
-        file_search: bool = False,
+        function_tools: Optional[List[Any]] = None,
+        tool_executor: Optional[ToolExecutor] = None,
         text_format: Optional[Type[BaseModel]] = None,
+        temperature: Optional[float] = None,
         metric_tag: str = "",
     ) -> LLMResponse:
-        tools = []
-        store = await self.get_file_store() if file_search else None
+        has_file_search, regular_tools = _split_tools(function_tools)
 
-        if file_search and store:
+        # pgvector retrieval (tool-based, composes with custom tools)
+        if has_file_search and self.retrieval:
+            return await self._retrieval_generate(
+                input, model, regular_tools, tool_executor, metric_tag
+            )
+
+        tools = []
+        store = await self.get_file_store() if has_file_search else None
+
+        if has_file_search and store:
             tools.append(
                 types.Tool(
                     file_search=types.FileSearch(file_search_store_names=[store.name])
@@ -738,16 +753,22 @@ class GeminiService(LLMService):
                 if parts:
                     gemini_messages.append(types.Content(role=g_role, parts=parts))
 
-        config_params = {"tools": tools}
+        # Add function tools
+        if regular_tools:
+            function_declarations = self._build_function_declarations(regular_tools)
+            if function_declarations:
+                tools.append(types.Tool(function_declarations=function_declarations))
+
+        config_params: Dict[str, Any] = {"tools": tools if tools else None}
         if system_instruction:
             config_params["system_instruction"] = [
                 system_instruction,
                 "VERY IMPORTANT: Keep the overall response super short. It should be like 1-2 sentences max. Like a short human message.",
                 "You have FULL MEMORY of this conversation. NEVER say your memory resets or that you don't remember. Focus your answer on the LAST user message but use conversation history for context.",
             ]
+        if temperature is not None:
+            config_params["temperature"] = temperature
 
-        # Add structured output config for Gemini when text_format is provided
-        # Only supported on certain models (e.g., gemini-2.5-pro-preview)
         gemini_json_models = ["gemini-3"]
         if any(model.startswith(m) for m in gemini_json_models):
             if text_format:
@@ -757,60 +778,120 @@ class GeminiService(LLMService):
 
         config = types.GenerateContentConfig(**config_params)
 
+        # Tool-calling loop when custom tools are present
+        if regular_tools and tool_executor:
+            response, tool_calls_made = await self._gemini_tool_loop(
+                model, gemini_messages, config, tool_executor, metric_tag
+            )
+
+            cited_chunks = (
+                self._extract_gemini_grounding_sources(response)
+                if has_file_search
+                else []
+            )
+            return LLMResponse(
+                text=response.text or "",
+                cited_chunks=cited_chunks if cited_chunks else None,
+                tool_calls=tool_calls_made if tool_calls_made else None,
+            )
+
+        # Simple generation
         response = await self.client.aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
         self._track_tokens(response, model, "generate_response", metric_tag)
 
-        # Extract sources and cited chunks from grounding metadata
-        sources: List[SourceChunk] = []
         cited_chunks: List[SourceChunk] = []
-        if file_search:
-            try:
-                seen_files: set[str] = set()
-                for candidate in response.candidates:
-                    grounding_meta = getattr(candidate, "grounding_metadata", None)
-                    if grounding_meta:
-                        chunks = getattr(grounding_meta, "grounding_chunks", None) or []
-                        for chunk in chunks:
-                            retrieved = getattr(chunk, "retrieved_context", None)
-                            if retrieved:
-                                filename = getattr(retrieved, "title", "") or ""
-                                # Text is in retrieved_context.text
-                                text = getattr(retrieved, "text", "") or ""
-                                file_id = getattr(retrieved, "uri", "") or ""
-
-                                # All chunks for evaluation (with text)
-                                cited_chunks.append(
-                                    SourceChunk(
-                                        file_id=file_id,
-                                        filename=filename,
-                                        text=text,
-                                        score=1.0,
-                                    )
-                                )
-
-                                # Distinct files for display
-                                if filename and filename not in seen_files:
-                                    seen_files.add(filename)
-                                    sources.append(
-                                        SourceChunk(
-                                            file_id=file_id,
-                                            filename=filename,
-                                            text="",
-                                            score=1.0,
-                                        )
-                                    )
-                sources = sources[:3]
-                cited_chunks = cited_chunks[:5]
-            except Exception as e:
-                logger.debug(f"Could not extract sources from Gemini response: {e}")
+        if has_file_search:
+            cited_chunks = self._extract_gemini_grounding_sources(response)
 
         return LLMResponse(
             text=response.text,
-            sources=sources if sources else None,
             cited_chunks=cited_chunks if cited_chunks else None,
+            tool_calls=None,
         )
+
+    def _extract_gemini_grounding_sources(self, response) -> List[SourceChunk]:
+        """Extract cited chunks from Gemini grounding metadata."""
+        try:
+            cited_chunks: List[SourceChunk] = []
+            for candidate in response.candidates:
+                grounding_meta = getattr(candidate, "grounding_metadata", None)
+                if grounding_meta:
+                    chunks = getattr(grounding_meta, "grounding_chunks", None) or []
+                    for chunk in chunks:
+                        retrieved = getattr(chunk, "retrieved_context", None)
+                        if retrieved:
+                            cited_chunks.append(
+                                SourceChunk(
+                                    file_id=getattr(retrieved, "uri", "") or "",
+                                    filename=getattr(retrieved, "title", "") or "",
+                                    text=getattr(retrieved, "text", "") or "",
+                                    score=1.0,
+                                )
+                            )
+            return cited_chunks[:5]
+        except Exception as e:
+            logger.debug(f"Could not extract sources from Gemini response: {e}")
+            return []
+
+    async def _gemini_tool_loop(
+        self,
+        model: str,
+        gemini_messages: List[types.Content],
+        config: types.GenerateContentConfig,
+        tool_executor: ToolExecutor,
+        metric_tag: str = "",
+    ) -> Tuple[Any, List[ToolCall]]:
+        """Run Gemini tool-calling loop. Returns (response, tool_calls_made)."""
+        tool_calls_made: List[ToolCall] = []
+
+        response = await self.client.aio.models.generate_content(
+            model=model, contents=gemini_messages, config=config
+        )
+
+        function_calls = self._extract_function_calls(response)
+
+        if function_calls:
+            function_response_parts = []
+            for fc in function_calls:
+                tool_name = fc.name
+                tool_args = dict(fc.args) if fc.args else {}
+                tool_id = f"{tool_name}_{len(tool_calls_made)}"
+
+                tool_calls_made.append(
+                    ToolCall(name=tool_name, arguments=tool_args, id=tool_id)
+                )
+
+                try:
+                    result = await tool_executor(tool_name, tool_args)
+                    result_dict = (
+                        result if isinstance(result, dict) else {"result": result}
+                    )
+                except Exception as e:
+                    logger.error(f"Tool execution error for {tool_name}: {e}")
+                    result_dict = {"error": str(e)}
+
+                function_response_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=tool_name, response=result_dict
+                        )
+                    )
+                )
+
+            if response.candidates and response.candidates[0].content:
+                gemini_messages.append(response.candidates[0].content)
+            gemini_messages.append(
+                types.Content(role="user", parts=function_response_parts)
+            )
+
+            response = await self.client.aio.models.generate_content(
+                model=model, contents=gemini_messages, config=config
+            )
+
+        self._track_tokens(response, model, "generate_response", metric_tag)
+        return response, tool_calls_made
 
     async def generate_json(
         self,
@@ -960,40 +1041,61 @@ class GeminiService(LLMService):
                         function_calls.append(part.function_call)
         return function_calls
 
-    async def generate_response_with_tools(
+    async def _retrieval_generate(
         self,
         input: str | List[Dict[str, Any]],
         model: str,
-        function_tools: List[Dict[str, Any]],
-        tool_executor: ToolExecutor,
-        temperature: Optional[float] = None,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
+        extra_executor: Optional[ToolExecutor] = None,
         metric_tag: str = "",
-    ) -> ToolCallResponse:
-        """
-        Generate a response with function calling support for Gemini.
+    ) -> LLMResponse:
+        search_tool = {
+            "type": "function",
+            "function": {
+                "name": "search_knowledge",
+                "description": "Search the knowledge base for relevant documents and information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
 
-        Handles function tools only. For file search with citations, use generate_response first.
-        Simple flow: call model -> if tool requested, execute and get final response.
-        """
-        # Convert input to Gemini format
+        retrieved_chunks: List[Dict[str, Any]] = []
+
+        async def composite_executor(name: str, args: dict):
+            if name == "search_knowledge":
+                chunks = await self.retrieval.query(args["query"], top_k=5)
+                retrieved_chunks.extend(chunks)
+                return {
+                    "results": [
+                        {
+                            "content": c["content"],
+                            "source": c["source_file"],
+                            "score": c["score"],
+                        }
+                        for c in chunks
+                    ]
+                }
+            if extra_executor:
+                return await extra_executor(name, args)
+            return {"error": f"Unknown tool: {name}"}
+
+        all_tools = [search_tool] + (extra_tools or [])
+
         system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
-
-        # Build function tools
-        function_declarations = self._build_function_declarations(function_tools)
+        function_declarations = self._build_function_declarations(all_tools)
         tools = (
             [types.Tool(function_declarations=function_declarations)]
             if function_declarations
             else []
         )
-
-        # Build system instruction, filtering out None
-        # sys_instructions = [
-        #     system_instruction,
-        #     "VERY IMPORTANT: Keep the overall response super short. It should be like 1-2 sentences max. Like a short human message.",
-        #     "You have FULL MEMORY of this conversation. NEVER say your memory resets or that you don't remember.",
-        #     "If you end up recommending a product, you should also include the exact product URL in the response (doesn't count towards the max length).",
-        # ]
-        # sys_instructions = [s for s in sys_instructions if s]
 
         config = types.GenerateContentConfig(
             tools=tools if tools else None,
@@ -1001,80 +1103,25 @@ class GeminiService(LLMService):
             thinking_config=types.ThinkingConfig(thinking_level="low")
             if model.startswith("gemini-3")
             else None,
-            temperature=temperature,
         )
 
-        tool_calls_made: List[ToolCall] = []
-
-        # First call
-        response = await self.client.aio.models.generate_content(
-            model=model, contents=gemini_messages, config=config
+        response, tool_calls_made = await self._gemini_tool_loop(
+            model, gemini_messages, config, composite_executor, metric_tag
         )
 
-        logger.info(
-            f"[tools] First response text: {response.text[:200] if response.text else 'None'}"
-        )
-
-        # Check for function calls
-        function_calls = self._extract_function_calls(response)
-        logger.info(
-            f"[tools] Function calls detected: {[fc.name for fc in function_calls] if function_calls else 'None'}"
-        )
-
-        if function_calls:
-            # Execute tools and build response parts
-            function_response_parts = []
-            for fc in function_calls:
-                tool_name = fc.name
-                tool_args = dict(fc.args) if fc.args else {}
-                tool_id = f"{tool_name}_{len(tool_calls_made)}"
-
-                tool_calls_made.append(
-                    ToolCall(name=tool_name, arguments=tool_args, id=tool_id)
-                )
-
-                try:
-                    result = await tool_executor(tool_name, tool_args)
-                    result_dict = (
-                        result if isinstance(result, dict) else {"result": result}
-                    )
-                except Exception as e:
-                    logger.error(f"Tool execution error for {tool_name}: {e}")
-                    result_dict = {"error": str(e)}
-
-                function_response_parts.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=tool_name, response=result_dict
-                        )
-                    )
-                )
-
-            # Add model response and tool results to conversation
-            if response.candidates and response.candidates[0].content:
-                gemini_messages.append(response.candidates[0].content)
-            gemini_messages.append(
-                types.Content(role="user", parts=function_response_parts)
+        cited_chunks: List[SourceChunk] = [
+            SourceChunk(
+                file_id=chunk["id"],
+                filename=chunk["source_file"],
+                text=chunk["content"],
+                score=chunk["score"],
             )
+            for chunk in retrieved_chunks
+        ]
 
-            # Get final response
-            response = await self.client.aio.models.generate_content(
-                model=model, contents=gemini_messages, config=config
-            )
-            logger.info(
-                f"[tools] Final response after tool call - text: {response.text[:200] if response.text else 'None'}"
-            )
-
-        self._track_tokens(response, model, "generate_response_with_tools", metric_tag)
-
-        # Log if response is empty (helps debug thinking-only responses)
-        if not response.text:
-            logger.warning(f"Empty response text. Candidates: {response.candidates}")
-
-        return ToolCallResponse(
+        return LLMResponse(
             text=response.text or "",
-            sources=None,
-            cited_chunks=None,
+            cited_chunks=cited_chunks[:5] if cited_chunks else None,
             tool_calls=tool_calls_made if tool_calls_made else None,
         )
 
@@ -1103,6 +1150,7 @@ class VertexAIGeminiService(LLMService):
         search_engine_id: Optional[str] = None,
         search_data_store_ids: Optional[List[str]] = None,
         monitoring: Optional[Any] = None,
+        retrieval: Optional[Any] = None,
     ):
         self.project = project
         self.project_number = project_number
@@ -1110,6 +1158,7 @@ class VertexAIGeminiService(LLMService):
         self.search_engine_id = search_engine_id
         self.search_data_store_ids = search_data_store_ids or []
         self.monitoring = monitoring
+        self.retrieval = retrieval
         super().__init__()
         self.file_store_id = None
         self._file_store = None
@@ -1417,45 +1466,59 @@ class VertexAIGeminiService(LLMService):
         self,
         input: str | List[Dict[str, Any]],
         model: str,
-        file_search: bool = False,
+        function_tools: Optional[List[Any]] = None,
+        tool_executor: Optional[ToolExecutor] = None,
         text_format: Optional[Type[BaseModel]] = None,
+        temperature: Optional[float] = None,
         metric_tag: str = "",
     ) -> LLMResponse:
-        """
-        Generate a response using Vertex AI Gemini with optional Vertex AI Search grounding.
+        has_file_search, regular_tools = _split_tools(function_tools)
 
-        When file_search=True and search_engine_id is configured, uses Discovery Engine
-        grounded generation to ground the response in your search data stores.
-
-        Args:
-            input: String or conversation messages
-            model: Model identifier
-            file_search: If True and search_engine_id is set, enables grounded generation
-            text_format: Optional Pydantic model for structured output
-
-        Returns:
-            LLMResponse with text and optional sources
-        """
-        # If file_search is enabled and we have a search engine, use grounded generation
-        if file_search and self.search_engine_id:
+        # Priority 1: Discovery Engine
+        if has_file_search and self.search_engine_id:
+            if regular_tools and tool_executor:
+                # Discovery Engine can't mix with function tools
+                if self.retrieval:
+                    return await self._retrieval_generate(
+                        input, model, regular_tools, tool_executor, metric_tag
+                    )
+                return await self._grounded_then_tools(
+                    input, model, regular_tools, tool_executor, metric_tag
+                )
             return await self._grounded_generate(input, model, metric_tag)
 
-        if file_search and not self.search_engine_id:
+        # Priority 2: pgvector retrieval
+        if has_file_search and self.retrieval:
+            return await self._retrieval_generate(
+                input, model, regular_tools, tool_executor, metric_tag
+            )
+
+        if has_file_search and not self.search_engine_id and not self.retrieval:
             logger.warning(
-                "file_search=True but no search_engine_id configured. "
-                "Grounded generation disabled."
+                "file_search requested but no search_engine_id or retrieval configured."
             )
 
         system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
 
-        config_params = {}
-
+        config_params: Dict[str, Any] = {}
         if system_instruction:
             config_params["system_instruction"] = [
                 system_instruction,
                 "VERY IMPORTANT: Keep the overall response super short. It should be like 1-2 sentences max. Like a short human message.",
                 "You have FULL MEMORY of this conversation. NEVER say your memory resets or that you don't remember. Focus your answer on the LAST user message but use conversation history for context.",
             ]
+            config_params["system_instruction"] = system_instruction
+
+        # Add function tools
+        if regular_tools:
+            function_declarations = self._build_function_declarations(regular_tools)
+            if function_declarations:
+                config_params["tools"] = [
+                    types.Tool(function_declarations=function_declarations)
+                ]
+
+        if temperature is not None:
+            config_params["temperature"] = temperature
 
         gemini_json_models = ["gemini-3"]
         if any(model.startswith(m) for m in gemini_json_models):
@@ -1466,6 +1529,18 @@ class VertexAIGeminiService(LLMService):
 
         config = types.GenerateContentConfig(**config_params) if config_params else None
 
+        # Tool-calling loop
+        if regular_tools and tool_executor:
+            response, tool_calls_made = await self._vertex_tool_loop(
+                model, gemini_messages, config, tool_executor, metric_tag
+            )
+            return LLMResponse(
+                text=response.text or "",
+                cited_chunks=None,
+                tool_calls=tool_calls_made if tool_calls_made else None,
+            )
+
+        # Simple generation
         response = await self.client.aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
@@ -1473,8 +1548,8 @@ class VertexAIGeminiService(LLMService):
 
         return LLMResponse(
             text=response.text,
-            sources=None,
             cited_chunks=None,
+            tool_calls=None,
         )
 
     async def _grounded_generate(
@@ -1597,8 +1672,7 @@ class VertexAIGeminiService(LLMService):
                     part.text for part in candidate.content.parts if part.text
                 )
 
-        # Extract sources and cited chunks from grounding metadata
-        sources: List[SourceChunk] = []
+        # Extract cited chunks from grounding metadata
         cited_chunks: List[SourceChunk] = []
         try:
             if response.candidates:
@@ -1608,49 +1682,30 @@ class VertexAIGeminiService(LLMService):
                     support_chunks = (
                         getattr(grounding_meta, "support_chunks", None) or []
                     )
-                    seen_files: set[str] = set()
                     for chunk in support_chunks:
-                        source = getattr(chunk, "chunk_text", "") or ""
-                        doc_name = ""
-                        doc_uri = ""
                         doc_metadata = getattr(chunk, "source", None)
-                        if doc_metadata:
-                            doc_name = getattr(doc_metadata, "title", "") or ""
-                            doc_uri = getattr(doc_metadata, "uri", "") or ""
-
                         cited_chunks.append(
                             SourceChunk(
-                                file_id=doc_uri,
-                                filename=doc_name,
-                                text=source,
+                                file_id=getattr(doc_metadata, "uri", "") or ""
+                                if doc_metadata
+                                else "",
+                                filename=getattr(doc_metadata, "title", "") or ""
+                                if doc_metadata
+                                else "",
+                                text=getattr(chunk, "chunk_text", "") or "",
                                 score=1.0,
                             )
                         )
-
-                        if doc_name and doc_name not in seen_files:
-                            seen_files.add(doc_name)
-                            sources.append(
-                                SourceChunk(
-                                    file_id=doc_uri,
-                                    filename=doc_name,
-                                    text="",
-                                    score=1.0,
-                                )
-                            )
-            sources = sources[:3]
             cited_chunks = cited_chunks[:5]
         except Exception as e:
             logger.debug(f"Could not extract sources from grounded response: {e}")
 
-        logger.info(
-            f"Grounded generation completed. Sources: {len(sources)}, "
-            f"Cited chunks: {len(cited_chunks)}"
-        )
+        logger.info(f"Grounded generation completed. Cited chunks: {len(cited_chunks)}")
 
         return LLMResponse(
             text=response_text,
-            sources=sources if sources else None,
             cited_chunks=cited_chunks if cited_chunks else None,
+            tool_calls=None,
         )
 
     async def generate_json(
@@ -1723,19 +1778,56 @@ class VertexAIGeminiService(LLMService):
                         function_calls.append(part.function_call)
         return function_calls
 
-    async def generate_response_with_tools(
+    async def _retrieval_generate(
         self,
         input: str | List[Dict[str, Any]],
         model: str,
-        function_tools: List[Dict[str, Any]],
-        tool_executor: Any,
-        temperature: Optional[float] = None,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
+        extra_executor: Optional[ToolExecutor] = None,
         metric_tag: str = "",
-    ) -> ToolCallResponse:
-        """Generate response with function calling on Vertex AI."""
-        system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
+    ) -> LLMResponse:
+        search_tool = {
+            "type": "function",
+            "function": {
+                "name": "search_knowledge",
+                "description": "Search the knowledge base for relevant documents and information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
 
-        function_declarations = self._build_function_declarations(function_tools)
+        retrieved_chunks: List[Dict[str, Any]] = []
+
+        async def composite_executor(name: str, args: dict):
+            if name == "search_knowledge":
+                chunks = await self.retrieval.query(args["query"], top_k=5)
+                retrieved_chunks.extend(chunks)
+                return {
+                    "results": [
+                        {
+                            "content": c["content"],
+                            "source": c["source_file"],
+                            "score": c["score"],
+                        }
+                        for c in chunks
+                    ]
+                }
+            if extra_executor:
+                return await extra_executor(name, args)
+            return {"error": f"Unknown tool: {name}"}
+
+        all_tools = [search_tool] + (extra_tools or [])
+
+        system_instruction, gemini_messages = self._convert_to_gemini_messages(input)
+        function_declarations = self._build_function_declarations(all_tools)
         tools = (
             [types.Tool(function_declarations=function_declarations)]
             if function_declarations
@@ -1748,9 +1840,93 @@ class VertexAIGeminiService(LLMService):
             thinking_config=types.ThinkingConfig(thinking_level="low")
             if model.startswith("gemini-3")
             else None,
-            temperature=temperature,
         )
 
+        response, tool_calls_made = await self._vertex_tool_loop(
+            model, gemini_messages, config, composite_executor, metric_tag
+        )
+
+        cited_chunks: List[SourceChunk] = [
+            SourceChunk(
+                file_id=chunk["id"],
+                filename=chunk["source_file"],
+                text=chunk["content"],
+                score=chunk["score"],
+            )
+            for chunk in retrieved_chunks
+        ]
+
+        return LLMResponse(
+            text=response.text or "",
+            cited_chunks=cited_chunks[:5] if cited_chunks else None,
+            tool_calls=tool_calls_made if tool_calls_made else None,
+        )
+
+    async def _grounded_then_tools(
+        self,
+        input: str | List[Dict[str, Any]],
+        model: str,
+        regular_tools: List[Dict[str, Any]],
+        tool_executor: ToolExecutor,
+        metric_tag: str = "",
+    ) -> LLMResponse:
+        """Two-pass: grounded generation for RAG, then tool-calling with RAG context."""
+        grounded = await self._grounded_generate(input, model, metric_tag)
+
+        # Inject grounded answer as context for the tool pass
+        if isinstance(input, list):
+            augmented = input + [
+                {
+                    "role": "system",
+                    "content": f"Context from knowledge base:\n{grounded['text']}",
+                }
+            ]
+        else:
+            augmented = [
+                {"role": "user", "content": input},
+                {
+                    "role": "system",
+                    "content": f"Context from knowledge base:\n{grounded['text']}",
+                },
+            ]
+
+        system_instruction, gemini_messages = self._convert_to_gemini_messages(
+            augmented
+        )
+        function_declarations = self._build_function_declarations(regular_tools)
+        tools = (
+            [types.Tool(function_declarations=function_declarations)]
+            if function_declarations
+            else []
+        )
+
+        config = types.GenerateContentConfig(
+            tools=tools if tools else None,
+            system_instruction=system_instruction,
+            thinking_config=types.ThinkingConfig(thinking_level="low")
+            if model.startswith("gemini-3")
+            else None,
+        )
+
+        response, tool_calls_made = await self._vertex_tool_loop(
+            model, gemini_messages, config, tool_executor, metric_tag
+        )
+
+        return LLMResponse(
+            text=response.text or "",
+            cited_chunks=grounded["cited_chunks"],
+            tool_calls=tool_calls_made if tool_calls_made else None,
+        )
+
+    async def _vertex_tool_loop(
+        self,
+        model: str,
+        gemini_messages: List[types.Content],
+        config: types.GenerateContentConfig,
+        tool_executor: ToolExecutor,
+        metric_tag: str = "",
+    ) -> Tuple[Any, List[ToolCall]]:
+        """Run Vertex AI tool-calling loop. Returns (response, tool_calls_made)."""
         tool_calls_made: List[ToolCall] = []
 
         response = await self.client.aio.models.generate_content(
@@ -1797,14 +1973,8 @@ class VertexAIGeminiService(LLMService):
                 model=model, contents=gemini_messages, config=config
             )
 
-        self._track_tokens(response, model, "generate_response_with_tools", metric_tag)
-
-        return ToolCallResponse(
-            text=response.text or "",
-            sources=None,
-            cited_chunks=None,
-            tool_calls=tool_calls_made if tool_calls_made else None,
-        )
+        self._track_tokens(response, model, "generate_response", metric_tag)
+        return response, tool_calls_made
 
 
 class LLMServiceRouter:
@@ -1842,6 +2012,8 @@ class LLMServiceRouter:
         search_data_store_ids: Optional[List[str]] = None,
         # Monitoring
         monitoring_project: Optional[str] = None,
+        # Retrieval (pgvector RAG)
+        retrieval: Optional[Any] = None,
     ):
         self._openai = OpenAIService(
             api_key=openai_api_key,
@@ -1873,6 +2045,7 @@ class LLMServiceRouter:
                 search_engine_id=search_engine_id,
                 search_data_store_ids=search_data_store_ids,
                 monitoring=monitoring,
+                retrieval=retrieval,
             )
             logger.info(
                 f"Using Vertex AI Gemini (project={vertex_project}, "
@@ -1886,6 +2059,7 @@ class LLMServiceRouter:
                 file_store_id=gemini_file_store_id,
                 file_store_name=file_store_name,
                 monitoring=monitoring,
+                retrieval=retrieval,
             )
 
         self.default_model = default_model
@@ -1924,24 +2098,31 @@ class LLMServiceRouter:
         self,
         input: str | List[Dict[str, Any]],
         model: Optional[str] = None,
-        file_search: bool = False,
+        function_tools: Optional[List[Any]] = None,
+        tool_executor: Optional[ToolExecutor] = None,
         text_format: Optional[Type[BaseModel]] = None,
+        temperature: Optional[float] = None,
         metric_tag: str = "",
+        # Deprecated — use function_tools=[file_search] instead
+        file_search: bool = False,
     ) -> LLMResponse:
-        """
-        Generate a response using the appropriate service based on model.
-
-        Args:
-            input: String or conversation messages
-            model: Model to use (defaults to default_model)
-            file_search: Enable RAG retrieval (Vertex AI Search grounded generation or file search)
-            text_format: Pydantic model for structured output
-            metric_tag: Custom tag for metric tracking
-        """
         model = model or self.default_model
+
+        # Backward compat: convert file_search=True to sentinel
+        if file_search:
+            function_tools = list(function_tools or [])
+            if not any(isinstance(t, _FileSearchSentinel) for t in function_tools):
+                function_tools.insert(0, _FILE_SEARCH)
+
         service = self._get_service(model)
         return await service.generate_response(
-            input, model, file_search, text_format, metric_tag=metric_tag
+            input,
+            model,
+            function_tools=function_tools,
+            tool_executor=tool_executor,
+            text_format=text_format,
+            temperature=temperature,
+            metric_tag=metric_tag,
         )
 
     # File operations (dispatches to Vertex AI Search or Gemini File Search Store)
@@ -2030,30 +2211,4 @@ class LLMServiceRouter:
         service = self._get_service(model)
         return await service.generate_json(
             messages, model, temperature, text_format, metric_tag=metric_tag
-        )
-
-    async def generate_response_with_tools(
-        self,
-        input: str | List[Dict[str, Any]],
-        model: Optional[str] = None,
-        function_tools: Optional[List[Dict[str, Any]]] = None,
-        tool_executor: Optional[ToolExecutor] = None,
-        temperature: Optional[float] = None,
-        metric_tag: str = "",
-    ) -> ToolCallResponse:
-        """
-        Generate a response with function calling support.
-
-        For file search with citations, use generate_response first.
-        Routes to the appropriate service based on model.
-        """
-        model = model or self.default_model
-        service = self._get_service(model)
-        return await service.generate_response_with_tools(
-            input,
-            model,
-            function_tools or [],
-            tool_executor,
-            temperature,
-            metric_tag=metric_tag,
         )
