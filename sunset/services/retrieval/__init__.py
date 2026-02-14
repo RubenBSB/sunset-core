@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncpg
 from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
@@ -56,6 +56,70 @@ class VertexAITokenizer(BaseTokenizer):
 
     def get_tokenizer(self) -> Any:
         return self._local_tokenizer
+
+
+_FILTER_OPS = {
+    "$eq": "=",
+    "$ne": "!=",
+    "$gt": ">",
+    "$gte": ">=",
+    "$lt": "<",
+    "$lte": "<=",
+}
+
+_COLUMN_KEYS = {"source_file", "content_type"}
+
+
+def _build_where(
+    filter_dict: Dict[str, Any], param_offset: int
+) -> Tuple[str, List[Any]]:
+    """Compile a metadata filter dict into a parameterised SQL WHERE clause.
+
+    Supports:
+      - Equality shorthand: ``{"key": "value"}``
+      - Operators: ``{"key": {"$gt": 10, "$lte": 100}}``
+      - ``$in``: ``{"key": {"$in": [1, 2, 3]}}``
+      - Top-level columns: ``source_file`` and ``content_type`` target
+        their columns directly instead of ``metadata->>``.
+
+    ``param_offset`` is the next available ``$N`` placeholder index (1-based).
+    Returns ``(sql_fragment, params)`` where *sql_fragment* starts with
+    ``" WHERE ..."`` and *params* is the list of bind values.
+    """
+    clauses: List[str] = []
+    params: List[Any] = []
+    idx = param_offset
+
+    for key, value in filter_dict.items():
+        col = key if key in _COLUMN_KEYS else f"metadata->>'{key}'"
+
+        if isinstance(value, dict):
+            for op, operand in value.items():
+                if op == "$in":
+                    if not isinstance(operand, (list, tuple)) or len(operand) == 0:
+                        raise ValueError(f"$in requires a non-empty list for '{key}'")
+                    placeholders = ", ".join(f"${idx + i}" for i in range(len(operand)))
+                    clauses.append(f"{col} IN ({placeholders})")
+                    params.extend(str(v) for v in operand)
+                    idx += len(operand)
+                elif op in _FILTER_OPS:
+                    sql_op = _FILTER_OPS[op]
+                    if isinstance(operand, (int, float)) and key not in _COLUMN_KEYS:
+                        clauses.append(f"({col})::float {sql_op} ${idx}")
+                        params.append(float(operand))
+                    else:
+                        clauses.append(f"{col} {sql_op} ${idx}")
+                        params.append(str(operand))
+                    idx += 1
+                else:
+                    raise ValueError(f"Unknown operator '{op}' for key '{key}'")
+        else:
+            clauses.append(f"{col} = ${idx}")
+            params.append(str(value))
+            idx += 1
+
+    sql = " WHERE " + " AND ".join(clauses)
+    return sql, params
 
 
 class RetrievalService:
@@ -348,11 +412,67 @@ class RetrievalService:
             return None
 
     # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    async def delete(self, where: Union[Dict[str, Any], str]) -> int:
+        """Delete chunks matching a metadata filter.
+
+        Args:
+            where: Metadata filter (same format as ``query(where=...)``).
+                Required — call with an explicit filter to avoid accidental
+                full-table deletes.
+
+        Returns the number of rows deleted.
+        """
+        if isinstance(where, dict) and where:
+            where_sql, params = _build_where(where, param_offset=1)
+        elif isinstance(where, str) and where:
+            where_sql = f" WHERE {where}"
+            params = []
+        else:
+            raise ValueError("where filter is required for delete()")
+
+        sql = f"DELETE FROM knowledge_chunks{where_sql}"
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(sql, *params)
+
+        count = int(result.split()[-1])
+        logger.info(f"Deleted {count} chunk(s)")
+        return count
+
+    # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
 
-    async def query(self, query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    async def query(
+        self,
+        query_text: str,
+        top_k: int = 5,
+        where: Optional[Union[Dict[str, Any], str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Embed the query and return the top-k most similar chunks.
+
+        Args:
+            query_text: The text to search for.
+            top_k: Number of results to return.
+            where: Optional metadata filter. Accepts either:
+
+                - A **dict** compiled to a parameterised WHERE clause::
+
+                    {"doctor_id": "dr_123"}                        # equality
+                    {"specialty": {"$in": ["cardio", "neuro"]}}    # in
+                    {"confidence": {"$gte": 0.8}}                  # range
+                    {"status": {"$ne": "archived"}}                # not equal
+
+                  Supported operators: ``$eq``, ``$ne``, ``$gt``,
+                  ``$gte``, ``$lt``, ``$lte``, ``$in``.
+
+                - A raw **SQL string** injected as-is (caller is
+                  responsible for safety)::
+
+                    "metadata->>'doctor_id' = 'dr_123'"
 
         Returns a list of dicts with keys:
         ``id``, ``content``, ``source_file``, ``metadata``, ``score``, ``created_at``.
@@ -360,26 +480,35 @@ class RetrievalService:
         """
         query_embedding = await self.embed(query_text)
 
+        # Base params: $1 = embedding, $2 = top_k
+        base_params: List[Any] = [query_embedding, top_k]
+
+        if isinstance(where, dict) and where:
+            where_sql, extra_params = _build_where(where, param_offset=3)
+            base_params.extend(extra_params)
+        elif isinstance(where, str) and where:
+            where_sql = f" WHERE {where}"
+        else:
+            where_sql = ""
+
+        sql = f"""
+            SELECT
+                id,
+                content,
+                source_file,
+                metadata,
+                content_type,
+                headings,
+                created_at,
+                1 - (embedding <=> $1::vector) AS score
+            FROM knowledge_chunks{where_sql}
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+        """
+
         async with self._pool.acquire() as conn:
             await register_vector(conn)
-            rows = await conn.fetch(
-                """
-                SELECT
-                    id,
-                    content,
-                    source_file,
-                    metadata,
-                    content_type,
-                    headings,
-                    created_at,
-                    1 - (embedding <=> $1::vector) AS score
-                FROM knowledge_chunks
-                ORDER BY embedding <=> $1::vector
-                LIMIT $2
-                """,
-                query_embedding,
-                top_k,
-            )
+            rows = await conn.fetch(sql, *base_params)
 
         return [
             {
