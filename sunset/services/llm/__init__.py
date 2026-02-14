@@ -747,6 +747,15 @@ class GeminiService(LLMService):
                                     logger.warning(
                                         f"Failed to parse image data URL: {e}"
                                     )
+                        elif part_type == "file":
+                            file_uri = part.get("file_uri")
+                            mime_type = part.get("mime_type", "application/pdf")
+                            if file_uri:
+                                parts.append(
+                                    types.Part.from_uri(
+                                        file_uri=file_uri, mime_type=mime_type
+                                    )
+                                )
 
                 # Map roles: 'assistant' -> 'model', 'user' -> 'user'
                 g_role = "model" if role == "assistant" else "user"
@@ -998,6 +1007,15 @@ class GeminiService(LLMService):
                                 )
                             except Exception as e:
                                 logger.warning(f"Failed to parse image data URL: {e}")
+                    elif part_type == "file":
+                        file_uri = part.get("file_uri")
+                        mime_type = part.get("mime_type", "application/pdf")
+                        if file_uri:
+                            parts.append(
+                                types.Part.from_uri(
+                                    file_uri=file_uri, mime_type=mime_type
+                                )
+                            )
 
             g_role = "model" if role == "assistant" else "user"
             if parts:
@@ -1455,6 +1473,15 @@ class VertexAIGeminiService(LLMService):
                                 )
                             except Exception as e:
                                 logger.warning(f"Failed to parse image data URL: {e}")
+                    elif part_type == "file":
+                        file_uri = part.get("file_uri")
+                        mime_type = part.get("mime_type", "application/pdf")
+                        if file_uri:
+                            parts.append(
+                                types.Part.from_uri(
+                                    file_uri=file_uri, mime_type=mime_type
+                                )
+                            )
 
             g_role = "model" if role == "assistant" else "user"
             if parts:

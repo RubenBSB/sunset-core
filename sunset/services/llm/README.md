@@ -90,6 +90,24 @@ result = await llm.generate_json(
 )
 ```
 
+### Document understanding (full file in context)
+
+Pass a GCS file directly to the model without RAG — the entire document is included in the prompt context:
+
+```python
+response = await llm.generate_response(
+    input=[
+        {"role": "user", "content": [
+            {"type": "file", "file_uri": "gs://my-bucket/report.pdf", "mime_type": "application/pdf"},
+            {"type": "text", "text": "Summarize this document."},
+        ]},
+    ],
+    model="gemini-2.5-flash",
+)
+```
+
+Supported MIME types include `application/pdf`, `text/plain`, `text/html`, `text/csv`, and others supported by the Gemini API. Only available with Gemini/Vertex AI providers.
+
 ### Custom tool calling
 
 ```python
