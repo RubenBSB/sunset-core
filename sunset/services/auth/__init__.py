@@ -67,6 +67,7 @@ class AuthService:
         is_production: Whether the app is running in production (affects cookie
             Secure and SameSite flags)
         refresh_cookie_name: Name of the HttpOnly cookie (default: "refresh_token")
+        refresh_cookie_domain: Cookie domain (default: None, uses request origin)
         refresh_cookie_path: Cookie path (default: "/auth")
     """
 
@@ -80,6 +81,7 @@ class AuthService:
         is_production: bool = False,
         refresh_cookie_name: str = "refresh_token",
         refresh_cookie_path: str = "/auth",
+        refresh_cookie_domain: Optional[str] = None,
     ):
         if not jwt_secret:
             raise ValueError("jwt_secret is required")
@@ -92,6 +94,7 @@ class AuthService:
         self.is_production = is_production
         self.refresh_cookie_name = refresh_cookie_name
         self.refresh_cookie_path = refresh_cookie_path
+        self.refresh_cookie_domain = refresh_cookie_domain
 
     # =========================================================================
     # Password Hashing (Argon2)
@@ -292,25 +295,35 @@ class AuthService:
 
     def set_refresh_cookie(self, response: Any, raw_token: str):
         """Set the refresh token as an HttpOnly cookie on a response."""
-        response.set_cookie(
+        kwargs = dict(
             key=self.refresh_cookie_name,
             value=raw_token,
             httponly=True,
             secure=self.is_production,
-            samesite="none" if self.is_production else "lax",
+            samesite="lax"
+            if self.refresh_cookie_domain
+            else ("none" if self.is_production else "lax"),
             path=self.refresh_cookie_path,
             max_age=self.refresh_token_expire_days * 24 * 3600,
         )
+        if self.refresh_cookie_domain:
+            kwargs["domain"] = self.refresh_cookie_domain
+        response.set_cookie(**kwargs)
 
     def clear_refresh_cookie(self, response: Any):
         """Clear the refresh token cookie."""
-        response.delete_cookie(
+        kwargs = dict(
             key=self.refresh_cookie_name,
             path=self.refresh_cookie_path,
             httponly=True,
             secure=self.is_production,
-            samesite="none" if self.is_production else "lax",
+            samesite="lax"
+            if self.refresh_cookie_domain
+            else ("none" if self.is_production else "lax"),
         )
+        if self.refresh_cookie_domain:
+            kwargs["domain"] = self.refresh_cookie_domain
+        response.delete_cookie(**kwargs)
 
     def get_refresh_token_from_cookie(self, request: Any) -> str:
         """Read the refresh token from the request cookies.
