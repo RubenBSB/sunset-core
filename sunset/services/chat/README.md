@@ -14,7 +14,7 @@ No specific `sunset.yaml` entries. Requires an LLM service to be configured (see
 from sunset.services.chat import ChatService, ConversationContext
 from sunset.services.llm import VertexAIGeminiService, file_search
 
-llm = VertexAIGeminiService(project=PROJECT_ID, location="global")
+llm = VertexAIGeminiService(project=PROJECT_ID, project_number=PROJECT_NUMBER, location="global")
 
 chat = ChatService(
     llm=llm,
