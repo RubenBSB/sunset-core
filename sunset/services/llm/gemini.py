@@ -30,54 +30,27 @@ class GeminiService(LLMService):
         self.monitoring = monitoring
         self.retrieval = retrieval
         super().__init__()
-        self.file_store_id = file_store_id
         self.file_store_name = file_store_name or "knowledge-base"
-        self._file_store = None  # Lazy-loaded
         self._store: Optional[GeminiFileStore] = None
-
-    async def get_file_store(self):
-        """
-        Lazily retrieve or create and cache the file store.
-
-        If file_store_id is provided, retrieves the existing store.
-        If not provided, creates a new store with file_store_name.
-        """
-        if self._file_store:
-            return self._file_store
-
-        if self.file_store_id:
-            # Retrieve existing store
-            try:
-                self._file_store = await self.client.aio.file_search_stores.get(
-                    name=self.file_store_id
-                )
-            except Exception as e:
-                logger.error(f"Failed to retrieve Gemini file store: {e}")
-                return None
-        else:
-            # Create new store lazily
-            try:
-                self._file_store = self.client.file_search_stores.create(
-                    config={"display_name": self.file_store_name}
-                )
-                self.file_store_id = self._file_store.name
-                logger.info(
-                    f"Created Gemini file search store: {self._file_store.name} "
-                    f"(display_name: {self.file_store_name}). "
-                    "Save this ID to GEMINI_FILE_STORE_ID to reuse."
-                )
-            except Exception as e:
-                logger.error(f"Failed to create Gemini file store: {e}")
-                return None
-
-        if not self._store:
-            self._store = GeminiFileStore(self.client, self._file_store.name)
-
-        return self._file_store
+        if file_store_id:
+            self._store = GeminiFileStore(self.client, file_store_id)
 
     @property
     def store(self) -> Optional[GeminiFileStore]:
         return self._store
+
+    async def _ensure_store(self) -> Optional[GeminiFileStore]:
+        """Lazily create or return the file store."""
+        if self._store:
+            return self._store
+        try:
+            self._store = await GeminiFileStore.create(
+                self.client, name=self.file_store_name
+            )
+            return self._store
+        except Exception as e:
+            logger.error(f"Failed to create Gemini file store: {e}")
+            return None
 
     def get_client(self):
         if not hasattr(self, "client"):
@@ -132,12 +105,14 @@ class GeminiService(LLMService):
             )
 
         tools = []
-        store = await self.get_file_store() if has_file_search else None
+        file_store = await self._ensure_store() if has_file_search else None
 
-        if has_file_search and store:
+        if has_file_search and file_store:
             tools.append(
                 types.Tool(
-                    file_search=types.FileSearch(file_search_store_names=[store.name])
+                    file_search=types.FileSearch(
+                        file_search_store_names=[file_store._store_name]
+                    )
                 )
             )
 

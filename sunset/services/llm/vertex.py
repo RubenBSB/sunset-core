@@ -100,12 +100,6 @@ class VertexAIGeminiService(LLMService):
         except Exception as e:
             logger.warning(f"Failed to track tokens: {e}")
 
-    async def get_file_store(self):
-        """Returns search engine config if available."""
-        if self.search_engine_id:
-            return {"search_engine_id": self.search_engine_id}
-        return None
-
     @property
     def store(self) -> Optional[VertexFileStore]:
         if not self._store and self.search_data_store_ids:

@@ -102,12 +102,13 @@ class LLMServiceRouter:
     @property
     def openai_file_store_id(self) -> Optional[str]:
         """Get OpenAI file store ID (may be set after lazy creation)."""
-        return self._openai.file_store_id
+        return self._openai.store._store_id if self._openai.store else None
 
     @property
     def gemini_file_store_id(self) -> Optional[str]:
         """Get Gemini file store ID (may be set after lazy creation). None if using Vertex AI."""
-        return self._gemini.file_store_id
+        store = self._gemini.store
+        return getattr(store, "_store_name", None) if store else None
 
     @property
     def search_engine_id(self) -> Optional[str]:

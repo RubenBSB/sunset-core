@@ -27,45 +27,22 @@ class OpenAIService(LLMService):
         self.monitoring = monitoring
         self.retrieval = retrieval
         super().__init__()
-        self.file_store_id = file_store_id
         self.file_store_name = file_store_name or "knowledge-base"
-        self._file_store = None  # Lazy-loaded
         self._store: Optional[OpenAIFileStore] = None
-
-    async def get_file_store(self):
-        """
-        Lazily retrieve or create and cache the file store.
-
-        If file_store_id is provided, retrieves the existing store.
-        If not provided, creates a new store with file_store_name.
-        """
-        if self._file_store:
-            return self._file_store
-
-        if self.file_store_id:
-            # Retrieve existing store
-            self._file_store = await self.client.vector_stores.retrieve(
-                vector_store_id=self.file_store_id
-            )
-        else:
-            # Create new store lazily
-            self._file_store = await self.client.vector_stores.create(
-                name=self.file_store_name
-            )
-            self.file_store_id = self._file_store.id
-            logger.info(
-                f"Created OpenAI vector store: {self._file_store.id} "
-                f"(name: {self.file_store_name}). "
-                "Save this ID to OPENAI_FILE_STORE_ID to reuse."
-            )
-
-        if not self._store:
-            self._store = OpenAIFileStore(self.client, self._file_store.id)
-
-        return self._file_store
+        if file_store_id:
+            self._store = OpenAIFileStore(self.client, file_store_id)
 
     @property
     def store(self) -> Optional[OpenAIFileStore]:
+        return self._store
+
+    async def _ensure_store(self) -> Optional[OpenAIFileStore]:
+        """Lazily create or return the file store."""
+        if self._store:
+            return self._store
+        self._store = await OpenAIFileStore.create(
+            self.client, name=self.file_store_name
+        )
         return self._store
 
     def get_client(self):
@@ -90,12 +67,12 @@ class OpenAIService(LLMService):
         include = []
 
         # File search setup
-        store = await self.get_file_store() if has_file_search else None
-        if has_file_search and store:
+        file_store = await self._ensure_store() if has_file_search else None
+        if has_file_search and file_store:
             tools.append(
                 {
                     "type": "file_search",
-                    "vector_store_ids": [store.id],
+                    "vector_store_ids": [file_store._store_id],
                 }
             )
             reasoning = (

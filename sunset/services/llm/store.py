@@ -65,6 +65,22 @@ class OpenAIFileStore(FileStore):
         self._client = client
         self._store_id = store_id
 
+    @classmethod
+    async def create(cls, client, name: str = "knowledge-base") -> "OpenAIFileStore":
+        """Create a new OpenAI vector store and return a ready FileStore."""
+        store = await client.vector_stores.create(name=name)
+        logger.info(
+            f"Created OpenAI vector store: {store.id} (name: {name}). "
+            "Save this ID to OPENAI_FILE_STORE_ID to reuse."
+        )
+        return cls(client, store.id)
+
+    @classmethod
+    async def from_id(cls, client, store_id: str) -> "OpenAIFileStore":
+        """Retrieve an existing OpenAI vector store by ID."""
+        await client.vector_stores.retrieve(vector_store_id=store_id)
+        return cls(client, store_id)
+
     async def upload(
         self,
         *,
@@ -145,6 +161,22 @@ class GeminiFileStore(FileStore):
     def __init__(self, client, store_name: str):
         self._client = client
         self._store_name = store_name
+
+    @classmethod
+    async def create(cls, client, name: str = "knowledge-base") -> "GeminiFileStore":
+        """Create a new Gemini file search store and return a ready FileStore."""
+        store = client.file_search_stores.create(config={"display_name": name})
+        logger.info(
+            f"Created Gemini file search store: {store.name} (display_name: {name}). "
+            "Save this ID to GEMINI_FILE_STORE_ID to reuse."
+        )
+        return cls(client, store.name)
+
+    @classmethod
+    async def from_id(cls, client, store_id: str) -> "GeminiFileStore":
+        """Retrieve an existing Gemini file search store by ID."""
+        await client.aio.file_search_stores.get(name=store_id)
+        return cls(client, store_id)
 
     async def upload(
         self,
