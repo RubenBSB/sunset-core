@@ -85,6 +85,14 @@ chunks_count = await retrieval.ingest_document(
     metadata={"school_id": "abc123"},
 )
 
+# Fast ingestion — skip OCR and table structure for text-layer PDFs
+chunks_count = await retrieval.ingest_document(
+    file_path="/tmp/uploaded.pdf",
+    metadata={"school_id": "abc123"},
+    do_ocr=False,
+    do_table_structure=False,
+)
+
 # Ingest raw text
 chunks_count = await retrieval.ingest(
     text="Some raw content...",
@@ -123,6 +131,13 @@ results = await retrieval.query(
 
 for chunk in results:
     print(chunk["content"], chunk["score"])
+
+# List all ingested source files
+files = await retrieval.list_sources()
+
+# List sources filtered by metadata
+files = await retrieval.list_sources(where={"school_id": "abc123"})
+# [{"source_file": "report.pdf", "chunks_count": 49, "created_at": datetime(...)}, ...]
 
 # Delete chunks by metadata
 deleted = await retrieval.delete(where={"school_id": "abc123"})
@@ -166,6 +181,7 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 - `embed(text) -> list[float]` — Embed a single text (async)
 - `embed_batch(texts) -> list[list[float]]` — Batch embed (async)
 - `ingest(text, source_file, metadata?, max_tokens?) -> int` — Chunk and embed raw text (async)
-- `ingest_document(file_path, metadata?, describe_images?, max_tokens?) -> int` — Parse, chunk, embed a document file (async)
+- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4) -> int` — Parse, chunk, embed a document file. Disable `do_ocr` for text-layer PDFs (biggest speedup) and `do_table_structure` if table data isn't needed. Uses `AcceleratorDevice.AUTO` (GPU when available) (async)
+- `list_sources(where=None) -> list[dict]` — List distinct ingested source files with chunk counts. `where` accepts a dict (parameterised), raw SQL string, or `None` for all. Returns `{source_file, chunks_count, created_at}` (async)
 - `delete(where) -> int` — Delete chunks matching a metadata filter (dict or raw SQL). Filter is required. Returns number of rows deleted (async)
 - `query(query_text, top_k=5, where=None) -> list[dict]` — Cosine similarity search with optional metadata filtering. `where` accepts a dict (parameterised) or raw SQL string. Returns `{id, content, source_file, metadata, score, created_at}` (async)

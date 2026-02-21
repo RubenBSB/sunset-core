@@ -256,6 +256,9 @@ class RetrievalService:
         metadata: Optional[Dict[str, Any]] = None,
         describe_images: bool = False,
         max_tokens: int = 2000,
+        do_ocr: bool = True,
+        do_table_structure: bool = True,
+        num_threads: int = 4,
     ) -> int:
         """Parse a document with Docling, chunk, embed, and insert into pgvector.
 
@@ -263,16 +266,32 @@ class RetrievalService:
         When ``describe_images`` is True, images/figures are sent to Gemini
         for description, and the descriptions are embedded alongside text chunks.
 
+        Args:
+            do_ocr: Run OCR on pages. Disable for text-layer PDFs to skip
+                the most expensive pipeline step.
+            do_table_structure: Recognise table structure. Disable if you
+                don't need structured table data.
+            num_threads: CPU threads for the Docling pipeline.
+
         Returns the total number of chunks inserted (text + image descriptions).
         """
         from docling.chunking import HybridChunker
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.pipeline_options import (
+            AcceleratorDevice,
+            AcceleratorOptions,
+            PdfPipelineOptions,
+        )
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling_core.types.doc import PictureItem
 
-        # Configure converter with image extraction if needed
         pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = do_ocr
+        pipeline_options.do_table_structure = do_table_structure
+        pipeline_options.accelerator_options = AcceleratorOptions(
+            num_threads=num_threads,
+            device=AcceleratorDevice.AUTO,
+        )
         if describe_images:
             pipeline_options.generate_picture_images = True
 
@@ -441,6 +460,53 @@ class RetrievalService:
         count = int(result.split()[-1])
         logger.info(f"Deleted {count} chunk(s)")
         return count
+
+    # ------------------------------------------------------------------
+    # List sources
+    # ------------------------------------------------------------------
+
+    async def list_sources(
+        self, where: Union[Dict[str, Any], str, None] = None
+    ) -> List[Dict[str, Any]]:
+        """Return distinct source files with chunk counts and earliest creation date.
+
+        Args:
+            where: Optional metadata filter (same format as ``query()`` and
+                ``delete()``). Pass ``None`` to list all sources.
+
+        Returns a list of dicts with keys:
+        ``source_file``, ``chunks_count``, ``created_at``.
+        """
+        params: List[Any] = []
+
+        if isinstance(where, dict) and where:
+            where_sql, params = _build_where(where, param_offset=1)
+        elif isinstance(where, str) and where:
+            where_sql = f" WHERE {where}"
+        else:
+            where_sql = ""
+
+        sql = f"""
+            SELECT
+                source_file,
+                COUNT(*) AS chunks_count,
+                MIN(created_at) AS created_at
+            FROM knowledge_chunks{where_sql}
+            GROUP BY source_file
+            ORDER BY created_at
+        """
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+
+        return [
+            {
+                "source_file": row["source_file"],
+                "chunks_count": row["chunks_count"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
     # Query
