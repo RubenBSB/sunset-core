@@ -30,6 +30,26 @@ IMAGE_DESCRIBE_PROMPT = (
 )
 IMAGE_DESCRIBE_MODEL = "gemini-2.5-flash"
 
+LLM_CHUNK_MODEL = "gemini-2.5-flash"
+LLM_CHUNK_PROMPT = """\
+You are a document chunking assistant. Given the attached document, extract its \
+full text content and split it into semantic chunks suitable for a RAG retrieval \
+system.
+
+Rules:
+- Each chunk should be a coherent, self-contained passage (200-1500 words).
+- Preserve the original text exactly — do not summarise, paraphrase, or omit content.
+- Split at natural boundaries: section headings, topic changes, paragraph breaks.
+- Include all content — headers, footers, tables (as text), captions, footnotes.
+- For tables, convert them into readable text rows.
+- For images, replace them with an [image] tag with detailed description (it might contain text, you should report it exactly too)
+- Return ONLY a JSON array of strings, one per chunk. No markdown fences, no \
+explanation.
+
+Example output:
+["First chunk text...", "Second chunk text...", "Third chunk text..."]
+"""
+
 
 class VertexAITokenizer(BaseTokenizer):
     """Tokenizer aligned with Gemini embedding models.
@@ -122,6 +142,27 @@ def _build_where(
     return sql, params
 
 
+def _merge_small_chunks(
+    texts: List[str], min_chars: int = 400, max_chars: int = 3000
+) -> List[str]:
+    """Merge consecutive small chunks to reduce embedding calls and improve context."""
+    merged: List[str] = []
+    buffer = ""
+    for text in texts:
+        if buffer and len(buffer) + len(text) > max_chars:
+            merged.append(buffer)
+            buffer = text
+        elif len(text) < min_chars or (buffer and len(buffer) < min_chars):
+            buffer = buffer + "\n\n" + text if buffer else text
+        else:
+            if buffer:
+                merged.append(buffer)
+            buffer = text
+    if buffer:
+        merged.append(buffer)
+    return merged
+
+
 class RetrievalService:
     """Async pgvector retrieval service with Vertex AI embeddings and Docling parsing.
 
@@ -130,6 +171,8 @@ class RetrievalService:
             (e.g. ``postgresql://user:pass@localhost:5432/dbname``).
         project: GCP project ID for Vertex AI embedding calls.
         location: GCP region for the Vertex AI endpoint.
+        llm_service: Optional LLM service instance (any ``LLMService`` subclass).
+            Required when using ``engine="llm"`` in ``ingest_document``.
     """
 
     def __init__(
@@ -137,10 +180,12 @@ class RetrievalService:
         dsn: str,
         project: str,
         location: str = "europe-west1",
+        llm_service: Optional[Any] = None,
     ):
         self.dsn = dsn
         self.project = project
         self.location = location
+        self.llm_service = llm_service
         self._pool: Optional[asyncpg.Pool] = None
         self._genai = genai.Client(vertexai=True, project=project, location=location)
 
@@ -213,6 +258,7 @@ class RetrievalService:
             return 0
 
         texts_to_embed = [chunker.contextualize(chunk) for chunk in chunks]
+        texts_to_embed = _merge_small_chunks(texts_to_embed)
         embeddings = await self.embed_batch(texts_to_embed)
 
         meta_str = json.dumps(metadata) if metadata else None
@@ -221,15 +267,15 @@ class RetrievalService:
         rows = [
             (
                 uuid.uuid4(),
-                chunk.text,
+                text,
                 embedding,
                 source_file,
                 meta_str,
                 "text_chunk",
-                list(chunk.meta.headings) if chunk.meta.headings else None,
+                None,
                 now,
             )
-            for chunk, embedding in zip(chunks, embeddings)
+            for text, embedding in zip(texts_to_embed, embeddings)
         ]
 
         async with self._pool.acquire() as conn:
@@ -259,22 +305,32 @@ class RetrievalService:
         do_ocr: bool = True,
         do_table_structure: bool = True,
         num_threads: int = 4,
+        engine: str = "docling",
+        llm_model: str = LLM_CHUNK_MODEL,
     ) -> int:
-        """Parse a document with Docling, chunk, embed, and insert into pgvector.
+        """Parse a document, chunk, embed, and insert into pgvector.
 
         Supports PDF, DOCX, PPTX, XLSX, HTML, Markdown, and more.
         When ``describe_images`` is True, images/figures are sent to Gemini
         for description, and the descriptions are embedded alongside text chunks.
 
         Args:
-            do_ocr: Run OCR on pages. Disable for text-layer PDFs to skip
-                the most expensive pipeline step.
-            do_table_structure: Recognise table structure. Disable if you
-                don't need structured table data.
-            num_threads: CPU threads for the Docling pipeline.
+            engine: ``"docling"`` (default) uses Docling for local parsing
+                and chunking. ``"llm"`` sends the file to a Gemini model
+                which extracts and chunks the text — faster, no heavy
+                dependencies, but costs per-token.
+            llm_model: Gemini model to use when ``engine="llm"``.
+            do_ocr: Run OCR on pages (docling engine only).
+            do_table_structure: Recognise table structure (docling engine only).
+            num_threads: CPU threads for the Docling pipeline (docling engine only).
 
         Returns the total number of chunks inserted (text + image descriptions).
         """
+        if engine == "llm":
+            return await self._ingest_document_llm(
+                file_path, metadata=metadata, llm_model=llm_model
+            )
+
         from docling.chunking import HybridChunker
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import (
@@ -321,20 +377,21 @@ class RetrievalService:
         # --- Text chunks ---
         if chunks:
             texts_to_embed = [chunker.contextualize(chunk) for chunk in chunks]
+            texts_to_embed = _merge_small_chunks(texts_to_embed)
             embeddings = await self.embed_batch(texts_to_embed)
 
             rows = [
                 (
                     uuid.uuid4(),
-                    chunk.text,
+                    text,
                     embedding,
                     source_file,
                     json.dumps(base_metadata),
                     "text_chunk",
-                    list(chunk.meta.headings) if chunk.meta.headings else None,
+                    None,
                     now,
                 )
-                for chunk, embedding in zip(chunks, embeddings)
+                for text, embedding in zip(texts_to_embed, embeddings)
             ]
 
             async with self._pool.acquire() as conn:
@@ -429,6 +486,99 @@ class RetrievalService:
         except Exception:
             logger.warning("Failed to describe image", exc_info=True)
             return None
+
+    # ------------------------------------------------------------------
+    # Ingestion — LLM-powered chunking
+    # ------------------------------------------------------------------
+
+    async def _ingest_document_llm(
+        self,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        llm_model: str = LLM_CHUNK_MODEL,
+    ) -> int:
+        """Send a document to an LLM for text extraction and chunking."""
+        import mimetypes
+        import os
+
+        if not self.llm_service:
+            raise ValueError(
+                "llm_service is required for engine='llm'. "
+                "Pass it to the RetrievalService constructor."
+            )
+
+        source_file = os.path.basename(file_path)
+        mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+
+        logger.info(f"LLM chunking document: {file_path} ({mime_type})")
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": LLM_CHUNK_PROMPT},
+                    {
+                        "type": "inline_data",
+                        "data": file_bytes,
+                        "mime_type": mime_type,
+                    },
+                ],
+            }
+        ]
+
+        response = await self.llm_service.generate_response(
+            input=messages,
+            model=llm_model,
+        )
+
+        raw = response["text"].strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        chunk_texts = json.loads(raw)
+        if not isinstance(chunk_texts, list) or not chunk_texts:
+            logger.warning(f"LLM returned no chunks for '{source_file}'")
+            return 0
+
+        chunk_texts = _merge_small_chunks(chunk_texts)
+        embeddings = await self.embed_batch(chunk_texts)
+
+        base_metadata = metadata or {}
+        base_metadata["path"] = file_path
+        base_metadata["engine"] = "llm"
+        meta_str = json.dumps(base_metadata)
+        now = datetime.now(timezone.utc)
+
+        rows = [
+            (
+                uuid.uuid4(),
+                text,
+                embedding,
+                source_file,
+                meta_str,
+                "text_chunk",
+                None,
+                now,
+            )
+            for text, embedding in zip(chunk_texts, embeddings)
+        ]
+
+        async with self._pool.acquire() as conn:
+            await register_vector(conn)
+            await conn.executemany(
+                """
+                INSERT INTO knowledge_chunks
+                    (id, content, embedding, source_file, metadata, content_type, headings, created_at)
+                VALUES ($1, $2, $3::vector, $4, $5::jsonb, $6, $7, $8)
+                """,
+                rows,
+            )
+
+        logger.info(f"Ingested {len(rows)} LLM chunk(s) from '{source_file}'")
+        return len(rows)
 
     # ------------------------------------------------------------------
     # Delete

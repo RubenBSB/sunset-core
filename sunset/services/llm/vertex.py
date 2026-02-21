@@ -178,6 +178,17 @@ class VertexAIGeminiService(LLMService):
                                 )
                             except Exception as e:
                                 logger.warning(f"Failed to parse image data URL: {e}")
+                    elif part_type == "inline_data":
+                        data = part.get("data")
+                        mime_type = part.get("mime_type", "application/octet-stream")
+                        if data:
+                            parts.append(
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        data=data, mime_type=mime_type
+                                    )
+                                )
+                            )
                     elif part_type == "file":
                         file_uri = part.get("file_uri")
                         mime_type = part.get("mime_type", "application/pdf")

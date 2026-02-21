@@ -74,6 +74,7 @@ retrieval = RetrievalService(
     dsn=DATABASE_URL,
     project=GCP_PROJECT_ID,
     location="europe-west1",
+    llm_service=llm,  # optional, required for engine="llm"
 )
 
 # Connect on startup
@@ -91,6 +92,21 @@ chunks_count = await retrieval.ingest_document(
     metadata={"school_id": "abc123"},
     do_ocr=False,
     do_table_structure=False,
+)
+
+# LLM-powered ingestion — no Docling needed, uses Gemini to extract and chunk
+chunks_count = await retrieval.ingest_document(
+    file_path="/tmp/uploaded.pdf",
+    metadata={"school_id": "abc123"},
+    engine="llm",
+)
+
+# LLM ingestion with a specific model
+chunks_count = await retrieval.ingest_document(
+    file_path="/tmp/uploaded.pdf",
+    metadata={"school_id": "abc123"},
+    engine="llm",
+    llm_model="gemini-2.5-pro",
 )
 
 # Ingest raw text
@@ -174,6 +190,7 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 | `dsn` | `str` | required | PostgreSQL connection string |
 | `project` | `str` | required | GCP project ID (for Vertex AI embeddings) |
 | `location` | `str` | `"europe-west1"` | GCP region for Vertex AI |
+| `llm_service` | `LLMService` | `None` | LLM service instance, required for `engine="llm"` |
 
 ### Key Methods
 
@@ -181,7 +198,7 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 - `embed(text) -> list[float]` — Embed a single text (async)
 - `embed_batch(texts) -> list[list[float]]` — Batch embed (async)
 - `ingest(text, source_file, metadata?, max_tokens?) -> int` — Chunk and embed raw text (async)
-- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4) -> int` — Parse, chunk, embed a document file. Disable `do_ocr` for text-layer PDFs (biggest speedup) and `do_table_structure` if table data isn't needed. Uses `AcceleratorDevice.AUTO` (GPU when available) (async)
+- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4, engine="docling", llm_model="gemini-2.5-flash") -> int` — Parse, chunk, embed a document file. `engine="docling"` (default) uses local Docling parsing; `engine="llm"` sends the file to the configured `llm_service` for extraction and chunking (faster, no heavy deps, costs per-token). `llm_model` selects the model for the LLM engine. Docling options: disable `do_ocr` for text-layer PDFs (biggest speedup), `do_table_structure` if tables aren't needed (async)
 - `list_sources(where=None) -> list[dict]` — List distinct ingested source files with chunk counts. `where` accepts a dict (parameterised), raw SQL string, or `None` for all. Returns `{source_file, chunks_count, created_at}` (async)
 - `delete(where) -> int` — Delete chunks matching a metadata filter (dict or raw SQL). Filter is required. Returns number of rows deleted (async)
 - `query(query_text, top_k=5, where=None) -> list[dict]` — Cosine similarity search with optional metadata filtering. `where` accepts a dict (parameterised) or raw SQL string. Returns `{id, content, source_file, metadata, score, created_at}` (async)
