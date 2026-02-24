@@ -3,6 +3,7 @@ import os
 from datetime import timedelta
 from typing import Optional
 
+import google.auth.credentials
 from google.auth import default
 from google.auth.transport import requests as google_requests
 from google.cloud import storage
@@ -28,20 +29,34 @@ class StorageService:
 
     def __init__(self):
         if not self._initialized:
+            self._emulator_host = os.getenv("STORAGE_EMULATOR_HOST")
+
+            if self._emulator_host:
+                self.project_id = "local-test-project"
+                self.bucket_name = os.getenv("GCS_BUCKET_NAME", "local-bucket")
+                self._credentials = None
+                self._client = storage.Client(
+                    project=self.project_id,
+                    credentials=google.auth.credentials.AnonymousCredentials(),
+                )
+                self._signing_sa_email = None
+                self._ensure_emulator_bucket()
+                self._initialized = True
+                logger.info(
+                    f"StorageService initialized with emulator: {self._emulator_host}"
+                )
+                return
+
             secrets = get_secrets()
             self.env = os.getenv("ENV", "local")
             self.project_id = secrets.get_secret("GCP_PROJECT_ID")
             self.bucket_name = secrets.get_secret("GCS_BUCKET_NAME")
 
-            # Get credentials for potential IAM signing
             self._credentials, _ = default()
             self._client = storage.Client(
                 project=self.project_id, credentials=self._credentials
             )
 
-            # Get service account email for signing URLs
-            # In Cloud Run/GCE, credentials have service_account_email
-            # For local dev with user credentials, we need a separate SA email
             self._signing_sa_email = self._get_signing_service_account(secrets)
 
             self._initialized = True
@@ -58,6 +73,13 @@ class StorageService:
                 "Set GCS_SIGNING_SERVICE_ACCOUNT for local development with user credentials."
             )
         return sa_email
+
+    def _ensure_emulator_bucket(self):
+        """Create the bucket in the emulator if it doesn't exist."""
+        bucket = self._client.bucket(self.bucket_name)
+        if not bucket.exists():
+            self._client.create_bucket(bucket)
+            logger.info(f"Created emulator bucket: {self.bucket_name}")
 
     @classmethod
     def get_instance(cls):
@@ -121,6 +143,10 @@ class StorageService:
             blob_path = parts[1] if len(parts) > 1 else ""
         else:
             blob_path = gcs_path
+
+        # Emulator doesn't support signed URLs — return direct URL
+        if self._emulator_host:
+            return f"{self._emulator_host}/storage/v1/b/{self.bucket_name}/o/{blob_path}?alt=media"
 
         bucket = self._get_bucket()
         blob = bucket.blob(blob_path)

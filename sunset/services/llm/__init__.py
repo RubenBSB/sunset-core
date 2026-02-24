@@ -57,8 +57,10 @@ def _split_tools(
     for t in function_tools:
         if isinstance(t, _FileSearchSentinel):
             has_fs = True
-        else:
+        elif isinstance(t, dict):
             regular.append(t)
+        else:
+            logger.warning(f"Ignoring non-dict tool entry: {t!r}")
     return has_fs, regular
 
 
