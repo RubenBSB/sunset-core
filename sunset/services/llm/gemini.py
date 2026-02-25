@@ -1,8 +1,12 @@
+import asyncio
 import base64
 import json
 import logging
+import os
 import re
-from typing import Any, Dict, List, Optional, Tuple, Type
+import tempfile
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Type
 
 from google import genai
 from google.genai import types
@@ -77,6 +81,14 @@ class GeminiService(LLMService):
         except Exception as e:
             logger.warning(f"Failed to track tokens: {e}")
 
+    _MIME_SUFFIXES = {
+        "application/pdf": ".pdf",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+
     def _parse_data_url(self, data_url: str) -> tuple[bytes, str]:
         """Parse a data URL and return (bytes, mime_type)."""
         match = re.match(r"data:([^;]+);base64,(.+)", data_url)
@@ -85,6 +97,59 @@ class GeminiService(LLMService):
             b64_data = match.group(2)
             return base64.b64decode(b64_data), mime_type
         raise ValueError("Invalid data URL format")
+
+    async def upload_file(self, file_data: bytes, content_type: str) -> types.File:
+        """Upload a file via the Gemini Files API and poll until ACTIVE."""
+        loop = asyncio.get_event_loop()
+        suffix = self._MIME_SUFFIXES.get(content_type, ".bin")
+
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        try:
+            await loop.run_in_executor(
+                None, lambda: (os.write(fd, file_data), os.close(fd))
+            )
+
+            uploaded = await loop.run_in_executor(
+                None,
+                lambda: self.client.files.upload(
+                    file=tmp_path,
+                    config=types.UploadFileConfig(mime_type=content_type),
+                ),
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        while uploaded.state != types.FileState.ACTIVE:
+            await asyncio.sleep(1)
+            uploaded = await loop.run_in_executor(
+                None, lambda: self.client.files.get(name=uploaded.name)
+            )
+
+        return uploaded
+
+    async def delete_file(self, file_name: str) -> None:
+        """Best-effort delete of a previously uploaded file."""
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, lambda: self.client.files.delete(name=file_name)
+            )
+        except Exception:
+            logger.debug(f"Failed to delete file {file_name}", exc_info=True)
+
+    @asynccontextmanager
+    async def managed_file(
+        self, file_data: bytes, content_type: str
+    ) -> AsyncIterator[types.File]:
+        """Upload a file, yield it for use, then delete it."""
+        uploaded = await self.upload_file(file_data, content_type)
+        try:
+            yield uploaded
+        finally:
+            await self.delete_file(uploaded.name)
 
     async def generate_response(
         self,

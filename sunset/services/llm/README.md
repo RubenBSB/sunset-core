@@ -108,6 +108,41 @@ response = await llm.generate_response(
 
 Supported MIME types include `application/pdf`, `text/plain`, `text/html`, `text/csv`, and others supported by the Gemini API. Only available with Gemini/Vertex AI providers.
 
+### File upload lifecycle (Gemini Files API)
+
+For large files that exceed inline limits, use `managed_file` to upload via the Gemini Files API, use the file in a prompt, and auto-delete it afterward:
+
+```python
+from sunset.services.llm import GeminiService
+
+gemini = GeminiService(api_key=GEMINI_API_KEY)
+
+async with gemini.managed_file(pdf_bytes, "application/pdf") as uploaded:
+    result = await gemini.generate_json(
+        messages=[{"role": "user", "content": [
+            {"type": "file", "file_uri": uploaded.uri, "mime_type": "application/pdf"},
+            {"type": "text", "text": "Extract the key fields from this document."},
+        ]}],
+        model="gemini-2.5-flash",
+        temperature=0,
+    )
+```
+
+You can also manage the lifecycle manually:
+
+```python
+uploaded = await gemini.upload_file(pdf_bytes, "application/pdf")
+try:
+    # use uploaded.uri in prompts ...
+    pass
+finally:
+    await gemini.delete_file(uploaded.name)
+```
+
+- `upload_file(file_data: bytes, content_type: str) -> types.File` — uploads and polls until ACTIVE
+- `delete_file(file_name: str)` — best-effort cleanup
+- `managed_file(file_data: bytes, content_type: str)` — async context manager combining both
+
 ### Custom tool calling
 
 ```python
