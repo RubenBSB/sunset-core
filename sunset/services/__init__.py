@@ -13,6 +13,7 @@ __all__ = [
     "RetrievalService",
     "ChatService",
     "CrawlService",
+    "RedisService",
 ]
 
 
@@ -66,4 +67,8 @@ def __getattr__(name: str):
         from sunset.services.crawl import CrawlService
 
         return CrawlService
+    if name == "RedisService":
+        from sunset.services.redis import RedisService
+
+        return RedisService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
