@@ -1,6 +1,6 @@
 # RetrievalService
 
-RAG pipeline: document parsing (Docling), chunking, Vertex AI embeddings (gemini-embedding-001), and cosine similarity search over pgvector.
+RAG pipeline: document parsing (Docling, Reducto, or LLM), chunking, Vertex AI embeddings (gemini-embedding-001), and cosine similarity search over pgvector.
 
 ## Setup
 
@@ -59,11 +59,14 @@ The child project's `requirements.txt` needs:
 
 ```
 pgvector
-docling
-docling-core
+docling        # for engine="docling"
+docling-core   # for engine="docling"
+reductoai      # for engine="reducto"
 ```
 
-These are heavy optional dependencies not bundled with sunset by default.
+These are optional dependencies not bundled with sunset by default. Install only what you need for your chosen engine. The `engine="llm"` path has no extra dependencies beyond `pgvector`.
+
+For `engine="reducto"`, set `REDUCTO_API_KEY` in your environment (get one at [studio.reducto.ai](https://studio.reducto.ai/)).
 
 ## Usage
 
@@ -80,7 +83,7 @@ retrieval = RetrievalService(
 # Connect on startup
 await retrieval.connect()
 
-# Ingest a document (PDF, DOCX, PPTX, HTML, Markdown)
+# Ingest a document (PDF, DOCX, PPTX, HTML, Markdown, TXT)
 chunks_count = await retrieval.ingest_document(
     file_path="/tmp/uploaded.pdf",
     metadata={"school_id": "abc123"},
@@ -92,6 +95,22 @@ chunks_count = await retrieval.ingest_document(
     metadata={"school_id": "abc123"},
     do_ocr=False,
     do_table_structure=False,
+)
+
+# Reducto-powered ingestion — cloud API, no heavy local deps
+# Requires REDUCTO_API_KEY env var and `reductoai` package
+chunks_count = await retrieval.ingest_document(
+    file_path="/tmp/uploaded.pdf",
+    metadata={"school_id": "abc123"},
+    engine="reducto",
+)
+
+# Reducto with image descriptions (maps to summarize_figures)
+chunks_count = await retrieval.ingest_document(
+    file_path="/tmp/uploaded.pdf",
+    metadata={"school_id": "abc123"},
+    engine="reducto",
+    describe_images=True,
 )
 
 # LLM-powered ingestion — no Docling needed, uses Gemini to extract and chunk
@@ -198,7 +217,7 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 - `embed(text) -> list[float]` — Embed a single text (async)
 - `embed_batch(texts) -> list[list[float]]` — Batch embed (async)
 - `ingest(text, source_file, metadata?, max_tokens?) -> int` — Chunk and embed raw text (async)
-- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4, engine="docling", llm_model="gemini-2.5-flash") -> int` — Parse, chunk, embed a document file. `engine="docling"` (default) uses local Docling parsing; `engine="llm"` sends the file to the configured `llm_service` for extraction and chunking (faster, no heavy deps, costs per-token). `llm_model` selects the model for the LLM engine. Docling options: disable `do_ocr` for text-layer PDFs (biggest speedup), `do_table_structure` if tables aren't needed (async)
+- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4, engine="docling", llm_model="gemini-2.5-flash") -> int` — Parse, chunk, embed a document file. Plain text files (`.txt`, `.text`) are handled directly. Engines: `"docling"` (default) — local Docling parsing; `"reducto"` — Reducto cloud API (requires `REDUCTO_API_KEY` env var and `reductoai` package, supports `describe_images` and `max_tokens`); `"llm"` — sends the file to `llm_service` for extraction and chunking. Docling options: disable `do_ocr` for text-layer PDFs (biggest speedup), `do_table_structure` if tables aren't needed (async)
 - `list_sources(where=None) -> list[dict]` — List distinct ingested source files with chunk counts. `where` accepts a dict (parameterised), raw SQL string, or `None` for all. Returns `{source_file, chunks_count, created_at}` (async)
 - `delete(where) -> int` — Delete chunks matching a metadata filter (dict or raw SQL). Filter is required. Returns number of rows deleted (async)
 - `query(query_text, top_k=5, where=None) -> list[dict]` — Cosine similarity search with optional metadata filtering. `where` accepts a dict (parameterised) or raw SQL string. Returns `{id, content, source_file, metadata, score, created_at}` (async)

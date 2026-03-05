@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncpg
-from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
 from google import genai
 from google.genai import types
 from pgvector.asyncpg import register_vector
@@ -51,31 +50,31 @@ Example output:
 """
 
 
-class VertexAITokenizer(BaseTokenizer):
-    """Tokenizer aligned with Gemini embedding models.
+def _make_vertex_ai_tokenizer(max_tokens: int = 2000):
+    """Create a VertexAITokenizer instance (imports docling lazily)."""
+    from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
 
-    Uses Google's local SentencePiece tokenizer (same vocabulary as
-    Gemini/Gemma models) for fast, offline token counting.
-    """
+    class VertexAITokenizer(BaseTokenizer):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+        max_tokens: int = max_tokens
+        _local_tokenizer: Any = None
 
-    max_tokens: int = 2000
-    _local_tokenizer: Any = None
+        def model_post_init(self, __context: Any) -> None:
+            from google.genai.local_tokenizer import LocalTokenizer
 
-    def model_post_init(self, __context: Any) -> None:
-        from google.genai.local_tokenizer import LocalTokenizer
+            self._local_tokenizer = LocalTokenizer(model_name="gemini-2.5-flash")
 
-        self._local_tokenizer = LocalTokenizer(model_name="gemini-2.5-flash")
+        def count_tokens(self, text: str) -> int:
+            return self._local_tokenizer.count_tokens(text).total_tokens
 
-    def count_tokens(self, text: str) -> int:
-        return self._local_tokenizer.count_tokens(text).total_tokens
+        def get_max_tokens(self) -> int:
+            return self.max_tokens
 
-    def get_max_tokens(self) -> int:
-        return self.max_tokens
+        def get_tokenizer(self) -> Any:
+            return self._local_tokenizer
 
-    def get_tokenizer(self) -> Any:
-        return self._local_tokenizer
+    return VertexAITokenizer(max_tokens=max_tokens)
 
 
 _FILTER_OPS = {
@@ -250,7 +249,7 @@ class RetrievalService:
         doc = DoclingDocument(name=source_file)
         doc.add_text(text=text)
 
-        tokenizer = VertexAITokenizer(max_tokens=max_tokens)
+        tokenizer = _make_vertex_ai_tokenizer(max_tokens=max_tokens)
         chunker = HybridChunker(tokenizer=tokenizer, merge_peers=True)
         chunks = list(chunker.chunk(dl_doc=doc))
 
@@ -316,9 +315,12 @@ class RetrievalService:
 
         Args:
             engine: ``"docling"`` (default) uses Docling for local parsing
-                and chunking. ``"llm"`` sends the file to a Gemini model
-                which extracts and chunks the text — faster, no heavy
-                dependencies, but costs per-token.
+                and chunking. ``"reducto"`` uses the Reducto API for
+                cloud-based parsing with OCR, table extraction, and
+                chunking — requires ``REDUCTO_API_KEY`` env var and
+                ``reductoai`` package. ``"llm"`` sends the file to a
+                Gemini model which extracts and chunks the text — faster,
+                no heavy dependencies, but costs per-token.
             llm_model: Gemini model to use when ``engine="llm"``.
             do_ocr: Run OCR on pages (docling engine only).
             do_table_structure: Recognise table structure (docling engine only).
@@ -326,9 +328,29 @@ class RetrievalService:
 
         Returns the total number of chunks inserted (text + image descriptions).
         """
+        if engine == "reducto":
+            return await self._ingest_document_reducto(
+                file_path,
+                metadata=metadata,
+                describe_images=describe_images,
+                max_tokens=max_tokens,
+            )
+
         if engine == "llm":
             return await self._ingest_document_llm(
                 file_path, metadata=metadata, llm_model=llm_model
+            )
+
+        # Plain text files are not supported by Docling's DocumentConverter.
+        # Read them directly and delegate to the raw-text ingest method.
+        import os
+
+        if os.path.splitext(file_path)[1].lower() in (".txt", ".text"):
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            source_file = os.path.basename(file_path)
+            return await self.ingest(
+                text, source_file, metadata=metadata, max_tokens=max_tokens
             )
 
         from docling.chunking import HybridChunker
@@ -362,7 +384,7 @@ class RetrievalService:
         doc = result.document
 
         # Chunk the document
-        tokenizer = VertexAITokenizer(max_tokens=max_tokens)
+        tokenizer = _make_vertex_ai_tokenizer(max_tokens=max_tokens)
         chunker = HybridChunker(tokenizer=tokenizer, merge_peers=True)
         chunks = list(chunker.chunk(dl_doc=doc))
 
@@ -486,6 +508,101 @@ class RetrievalService:
         except Exception:
             logger.warning("Failed to describe image", exc_info=True)
             return None
+
+    # ------------------------------------------------------------------
+    # Ingestion — Reducto-powered parsing
+    # ------------------------------------------------------------------
+
+    async def _ingest_document_reducto(
+        self,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        describe_images: bool = False,
+        max_tokens: int = 2000,
+    ) -> int:
+        """Parse a document with the Reducto API, then embed and insert chunks."""
+        import asyncio
+        import os
+        from pathlib import Path
+
+        from reducto import Reducto
+
+        client = Reducto()
+        source_file = os.path.basename(file_path)
+
+        # Reducto SDK is synchronous — run in a thread to avoid blocking.
+        upload = await asyncio.to_thread(client.upload, file=Path(file_path))
+
+        parse_kwargs: Dict[str, Any] = {
+            "input": upload,
+            "formatting": {"table_output_format": "md"},
+            "retrieval": {
+                "chunking": {
+                    "chunk_mode": "variable",
+                    "chunk_size": max_tokens,
+                },
+                "embedding_optimized": True,
+            },
+        }
+        if describe_images:
+            parse_kwargs["enhance"] = {"summarize_figures": True}
+
+        result = await asyncio.to_thread(client.parse.run, **parse_kwargs)
+
+        chunks = result.result.chunks
+        if not chunks:
+            logger.warning(f"Reducto returned no chunks for '{source_file}'")
+            return 0
+
+        # Prefer the embedding-optimized `embed` field, fall back to `content`.
+        texts = []
+        for chunk in chunks:
+            text = getattr(chunk, "embed", None) or chunk.content
+            if text:
+                texts.append(text)
+
+        if not texts:
+            return 0
+
+        texts = _merge_small_chunks(texts)
+        embeddings = await self.embed_batch(texts)
+
+        base_metadata = metadata or {}
+        base_metadata["path"] = file_path
+        base_metadata["engine"] = "reducto"
+        meta_str = json.dumps(base_metadata)
+        now = datetime.now(timezone.utc)
+
+        rows = [
+            (
+                uuid.uuid4(),
+                text,
+                embedding,
+                source_file,
+                meta_str,
+                "text_chunk",
+                None,
+                now,
+            )
+            for text, embedding in zip(texts, embeddings)
+        ]
+
+        async with self._pool.acquire() as conn:
+            await register_vector(conn)
+            await conn.executemany(
+                """
+                INSERT INTO knowledge_chunks
+                    (id, content, embedding, source_file, metadata, content_type, headings, created_at)
+                VALUES ($1, $2, $3::vector, $4, $5::jsonb, $6, $7, $8)
+                """,
+                rows,
+            )
+
+        logger.info(
+            f"Ingested {len(rows)} Reducto chunk(s) from '{source_file}' "
+            f"(job_id={result.job_id}, pages={result.usage.num_pages})"
+        )
+        return len(rows)
 
     # ------------------------------------------------------------------
     # Ingestion — LLM-powered chunking

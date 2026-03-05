@@ -21,7 +21,7 @@ infra:
 
 When `storage_buckets` is configured in `sunset.yaml`, `sunset run` automatically starts a [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) emulator and sets `STORAGE_EMULATOR_HOST` on all containers. No GCP credentials or bucket pre-creation needed — buckets are created on first access.
 
-The `StorageService` detects the emulator automatically. `generate_signed_url()` returns a direct emulator URL instead of a signed URL.
+The `StorageService` detects the emulator automatically. `generate_signed_url()` returns a direct emulator URL using `STORAGE_EMULATOR_PUBLIC_HOST` (defaults to `http://localhost:4443`) so the URL is reachable from the browser.
 
 ### Env Vars (Production)
 

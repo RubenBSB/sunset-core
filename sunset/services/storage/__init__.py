@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import timedelta
 from typing import Optional
+from urllib.parse import quote
 
 import google.auth.credentials
 from google.auth import default
@@ -40,6 +41,9 @@ class StorageService:
                     credentials=google.auth.credentials.AnonymousCredentials(),
                 )
                 self._signing_sa_email = None
+                self._emulator_public_host = os.getenv(
+                    "STORAGE_EMULATOR_PUBLIC_HOST", "http://localhost:4443"
+                )
                 self._ensure_emulator_bucket()
                 self._initialized = True
                 logger.info(
@@ -144,9 +148,10 @@ class StorageService:
         else:
             blob_path = gcs_path
 
-        # Emulator doesn't support signed URLs — return direct URL
+        # Emulator: return direct URL using the public host (reachable from browser)
         if self._emulator_host:
-            return f"{self._emulator_host}/storage/v1/b/{self.bucket_name}/o/{blob_path}?alt=media"
+            encoded_path = quote(blob_path, safe="")
+            return f"{self._emulator_public_host}/storage/v1/b/{self.bucket_name}/o/{encoded_path}?alt=media"
 
         bucket = self._get_bucket()
         blob = bucket.blob(blob_path)
