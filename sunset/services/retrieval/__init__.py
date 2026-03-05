@@ -527,7 +527,10 @@ class RetrievalService:
 
         from reducto import Reducto
 
-        client = Reducto()
+        from sunset.services.secrets import get_secrets
+
+        api_key = get_secrets().get_secret("REDUCTO_API_KEY")
+        client = Reducto(api_key=api_key)
         source_file = os.path.basename(file_path)
 
         # Reducto SDK is synchronous — run in a thread to avoid blocking.

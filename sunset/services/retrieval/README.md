@@ -66,7 +66,7 @@ reductoai      # for engine="reducto"
 
 These are optional dependencies not bundled with sunset by default. Install only what you need for your chosen engine. The `engine="llm"` path has no extra dependencies beyond `pgvector`.
 
-For `engine="reducto"`, set `REDUCTO_API_KEY` in your environment (get one at [studio.reducto.ai](https://studio.reducto.ai/)).
+For `engine="reducto"`, add `REDUCTO_API_KEY` to your secrets (get one at [studio.reducto.ai](https://studio.reducto.ai/)). The key is fetched via `SecretsService` at runtime.
 
 ## Usage
 
@@ -98,7 +98,7 @@ chunks_count = await retrieval.ingest_document(
 )
 
 # Reducto-powered ingestion — cloud API, no heavy local deps
-# Requires REDUCTO_API_KEY env var and `reductoai` package
+# Requires REDUCTO_API_KEY in secrets and `reductoai` package
 chunks_count = await retrieval.ingest_document(
     file_path="/tmp/uploaded.pdf",
     metadata={"school_id": "abc123"},
@@ -217,7 +217,7 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 - `embed(text) -> list[float]` — Embed a single text (async)
 - `embed_batch(texts) -> list[list[float]]` — Batch embed (async)
 - `ingest(text, source_file, metadata?, max_tokens?) -> int` — Chunk and embed raw text (async)
-- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4, engine="docling", llm_model="gemini-2.5-flash") -> int` — Parse, chunk, embed a document file. Plain text files (`.txt`, `.text`) are handled directly. Engines: `"docling"` (default) — local Docling parsing; `"reducto"` — Reducto cloud API (requires `REDUCTO_API_KEY` env var and `reductoai` package, supports `describe_images` and `max_tokens`); `"llm"` — sends the file to `llm_service` for extraction and chunking. Docling options: disable `do_ocr` for text-layer PDFs (biggest speedup), `do_table_structure` if tables aren't needed (async)
+- `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4, engine="docling", llm_model="gemini-2.5-flash") -> int` — Parse, chunk, embed a document file. Plain text files (`.txt`, `.text`) are handled directly. Engines: `"docling"` (default) — local Docling parsing; `"reducto"` — Reducto cloud API (requires `REDUCTO_API_KEY` in secrets and `reductoai` package, supports `describe_images` and `max_tokens`); `"llm"` — sends the file to `llm_service` for extraction and chunking. Docling options: disable `do_ocr` for text-layer PDFs (biggest speedup), `do_table_structure` if tables aren't needed (async)
 - `list_sources(where=None) -> list[dict]` — List distinct ingested source files with chunk counts. `where` accepts a dict (parameterised), raw SQL string, or `None` for all. Returns `{source_file, chunks_count, created_at}` (async)
 - `delete(where) -> int` — Delete chunks matching a metadata filter (dict or raw SQL). Filter is required. Returns number of rows deleted (async)
 - `query(query_text, top_k=5, where=None) -> list[dict]` — Cosine similarity search with optional metadata filtering. `where` accepts a dict (parameterised) or raw SQL string. Returns `{id, content, source_file, metadata, score, created_at}` (async)
