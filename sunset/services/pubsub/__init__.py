@@ -33,7 +33,9 @@ class PubSubService:
             self.project_id = os.getenv("PUBSUB_PROJECT_ID") or os.getenv(
                 "GCP_PROJECT_ID", "local-test-project"
             )
-            self.topic_prefix = os.getenv("PUBSUB_TOPIC_PREFIX", "vedis")
+            self.topic_prefix = os.getenv("PUBSUB_TOPIC_PREFIX") or os.getenv(
+                "PROJECT_NAME", "app"
+            )
 
             self.publisher = pubsub_v1.PublisherClient()
             self.subscriber = pubsub_v1.SubscriberClient()
