@@ -64,6 +64,18 @@ class VertexAIGeminiService(LLMService):
             )
         return self.client
 
+    def _client_for(self, model: str):
+        """Return global-endpoint client for Gemini 3 models, default client otherwise."""
+        if model.startswith("gemini-3"):
+            if not hasattr(self, "_global_client"):
+                self._global_client = genai.Client(
+                    vertexai=True,
+                    project=self.project,
+                    location="global",
+                )
+            return self._global_client
+        return self.client
+
     def _get_document_client(self):
         """Lazily create the Discovery Engine DocumentServiceClient."""
         if self._document_client is None:
@@ -284,7 +296,7 @@ class VertexAIGeminiService(LLMService):
             )
 
         # Simple generation
-        response = await self.client.aio.models.generate_content(
+        response = await self._client_for(model).aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
         self._track_tokens(response, model, "generate_response", metric_tag)
@@ -474,7 +486,7 @@ class VertexAIGeminiService(LLMService):
             if system_instruction:
                 config_params["system_instruction"] = system_instruction
 
-            response = await self.client.aio.models.generate_content(
+            response = await self._client_for(model).aio.models.generate_content(
                 model=model,
                 contents=gemini_messages,
                 config=types.GenerateContentConfig(**config_params),
@@ -672,7 +684,8 @@ class VertexAIGeminiService(LLMService):
         """Run Vertex AI tool-calling loop. Returns (response, tool_calls_made)."""
         tool_calls_made: List[ToolCall] = []
 
-        response = await self.client.aio.models.generate_content(
+        client = self._client_for(model)
+        response = await client.aio.models.generate_content(
             model=model, contents=gemini_messages, config=config
         )
 
@@ -712,7 +725,7 @@ class VertexAIGeminiService(LLMService):
                 types.Content(role="user", parts=function_response_parts)
             )
 
-            response = await self.client.aio.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model=model, contents=gemini_messages, config=config
             )
 
