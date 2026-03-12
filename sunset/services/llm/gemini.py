@@ -626,7 +626,7 @@ class GeminiService(LLMService):
         config = types.GenerateContentConfig(
             tools=tools if tools else None,
             system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(thinking_level="low")
+            thinking_config=types.ThinkingConfig(thinking_budget=256)
             if model.startswith("gemini-3")
             else None,
         )

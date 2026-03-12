@@ -54,25 +54,22 @@ class VertexAIGeminiService(LLMService):
         self._document_client = None
         self._search_client = None
         self._store: Optional[VertexFileStore] = None
+        self._global_client = genai.Client(
+            vertexai=True,
+            project=self.project,
+            location="global",
+        )
 
     def get_client(self):
-        if not hasattr(self, "client"):
-            return genai.Client(
-                vertexai=True,
-                project=self.project,
-                location=self.location,
-            )
-        return self.client
+        return genai.Client(
+            vertexai=True,
+            project=self.project,
+            location=self.location,
+        )
 
     def _client_for(self, model: str):
         """Return global-endpoint client for Gemini 3 models, default client otherwise."""
         if model.startswith("gemini-3"):
-            if not hasattr(self, "_global_client"):
-                self._global_client = genai.Client(
-                    vertexai=True,
-                    project=self.project,
-                    location="global",
-                )
             return self._global_client
         return self.client
 
@@ -592,7 +589,7 @@ class VertexAIGeminiService(LLMService):
         config = types.GenerateContentConfig(
             tools=tools if tools else None,
             system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(thinking_level="low")
+            thinking_config=types.ThinkingConfig(thinking_budget=256)
             if model.startswith("gemini-3")
             else None,
         )
@@ -658,7 +655,7 @@ class VertexAIGeminiService(LLMService):
         config = types.GenerateContentConfig(
             tools=tools if tools else None,
             system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(thinking_level="low")
+            thinking_config=types.ThinkingConfig(thinking_budget=256)
             if model.startswith("gemini-3")
             else None,
         )
