@@ -172,6 +172,9 @@ class RetrievalService:
         location: GCP region for the Vertex AI endpoint.
         llm_service: Optional LLM service instance (any ``LLMService`` subclass).
             Required when using ``engine="llm"`` in ``ingest_document``.
+        pool: Optional pre-existing ``asyncpg.Pool``. When provided, the
+            service reuses this pool instead of creating its own, and
+            ``close()`` becomes a no-op (the caller manages the pool lifecycle).
     """
 
     def __init__(
@@ -180,12 +183,14 @@ class RetrievalService:
         project: str,
         location: str = "europe-west1",
         llm_service: Optional[Any] = None,
+        pool: Optional[asyncpg.Pool] = None,
     ):
         self.dsn = dsn
         self.project = project
         self.location = location
         self.llm_service = llm_service
-        self._pool: Optional[asyncpg.Pool] = None
+        self._pool: Optional[asyncpg.Pool] = pool
+        self._external_pool = pool is not None
         self._genai = genai.Client(vertexai=True, project=project, location=location)
 
     # ------------------------------------------------------------------
@@ -193,15 +198,23 @@ class RetrievalService:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Create the asyncpg connection pool and register the vector type."""
-        self._pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=10)
-        async with self._pool.acquire() as conn:
-            await register_vector(conn)
+        """Create the asyncpg connection pool and register the vector type.
+
+        If an external ``pool`` was passed to the constructor, this registers
+        the pgvector type on it but does not create a new pool.
+        """
+        if not self._external_pool:
+            self._pool = await asyncpg.create_pool(
+                self.dsn, min_size=2, max_size=10, init=register_vector
+            )
+        else:
+            async with self._pool.acquire() as conn:
+                await register_vector(conn)
         logger.info("RetrievalService connected to database")
 
     async def close(self) -> None:
-        """Close the connection pool."""
-        if self._pool:
+        """Close the connection pool (skipped if using an external pool)."""
+        if self._pool and not self._external_pool:
             await self._pool.close()
             self._pool = None
             logger.info("RetrievalService disconnected")
@@ -278,7 +291,6 @@ class RetrievalService:
         ]
 
         async with self._pool.acquire() as conn:
-            await register_vector(conn)
             await conn.executemany(
                 """
                 INSERT INTO knowledge_chunks
@@ -417,7 +429,6 @@ class RetrievalService:
             ]
 
             async with self._pool.acquire() as conn:
-                await register_vector(conn)
                 await conn.executemany(
                     """
                     INSERT INTO knowledge_chunks
@@ -461,7 +472,6 @@ class RetrievalService:
                 }
 
                 async with self._pool.acquire() as conn:
-                    await register_vector(conn)
                     await conn.execute(
                         """
                         INSERT INTO knowledge_chunks
@@ -591,7 +601,6 @@ class RetrievalService:
         ]
 
         async with self._pool.acquire() as conn:
-            await register_vector(conn)
             await conn.executemany(
                 """
                 INSERT INTO knowledge_chunks
@@ -687,7 +696,6 @@ class RetrievalService:
         ]
 
         async with self._pool.acquire() as conn:
-            await register_vector(conn)
             await conn.executemany(
                 """
                 INSERT INTO knowledge_chunks
@@ -843,7 +851,6 @@ class RetrievalService:
         """
 
         async with self._pool.acquire() as conn:
-            await register_vector(conn)
             rows = await conn.fetch(sql, *base_params)
 
         return [

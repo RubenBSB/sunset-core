@@ -80,7 +80,27 @@ retrieval = RetrievalService(
     llm_service=llm,  # optional, required for engine="llm"
 )
 
-# Connect on startup
+# Connect on startup (creates an internal asyncpg pool with min_size=2)
+await retrieval.connect()
+```
+
+#### Sharing an existing asyncpg pool
+
+If your app already has an `asyncpg.Pool`, pass it to avoid a separate pool
+and the connection overhead that comes with it:
+
+```python
+retrieval = RetrievalService(
+    dsn=DATABASE_URL,
+    project=GCP_PROJECT_ID,
+    pool=existing_pool,  # reuse your app's pool
+)
+await retrieval.connect()  # registers pgvector type, no new pool created
+# close() is a no-op — you manage the pool lifecycle
+```
+
+```python
+# Without a shared pool (default):
 await retrieval.connect()
 
 # Ingest a document (PDF, DOCX, PPTX, HTML, Markdown, TXT)
@@ -210,10 +230,11 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 | `project` | `str` | required | GCP project ID (for Vertex AI embeddings) |
 | `location` | `str` | `"europe-west1"` | GCP region for Vertex AI |
 | `llm_service` | `LLMService` | `None` | LLM service instance, required for `engine="llm"` |
+| `pool` | `asyncpg.Pool` | `None` | Pre-existing pool to reuse. When provided, `connect()` only registers the pgvector type and `close()` is a no-op |
 
 ### Key Methods
 
-- `connect()` / `close()` — Manage the asyncpg connection pool (async)
+- `connect()` / `close()` — Manage the asyncpg connection pool. If an external `pool` was provided, `connect()` only registers the pgvector type and `close()` is a no-op (async)
 - `embed(text) -> list[float]` — Embed a single text (async)
 - `embed_batch(texts) -> list[list[float]]` — Batch embed (async)
 - `ingest(text, source_file, metadata?, max_tokens?) -> int` — Chunk and embed raw text (async)
