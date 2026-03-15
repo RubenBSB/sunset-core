@@ -578,7 +578,9 @@ class RetrievalService:
         # Prefer the embedding-optimized `embed` field, fall back to `content`.
         texts = []
         for chunk in chunks:
-            if isinstance(chunk, dict):
+            if isinstance(chunk, str):
+                text = chunk
+            elif isinstance(chunk, dict):
                 text = chunk.get("embed") or chunk.get("content", "")
             else:
                 text = getattr(chunk, "embed", None) or chunk.content
