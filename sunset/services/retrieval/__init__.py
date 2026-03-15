@@ -562,7 +562,15 @@ class RetrievalService:
 
         result = await asyncio.to_thread(client.parse.run, **parse_kwargs)
 
-        chunks = result.result.chunks
+        if result.result.type == "url":
+            import httpx
+
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(result.result.url)
+                resp.raise_for_status()
+                chunks = resp.json()
+        else:
+            chunks = result.result.chunks
         if not chunks:
             logger.warning(f"Reducto returned no chunks for '{source_file}'")
             return 0
@@ -570,7 +578,10 @@ class RetrievalService:
         # Prefer the embedding-optimized `embed` field, fall back to `content`.
         texts = []
         for chunk in chunks:
-            text = getattr(chunk, "embed", None) or chunk.content
+            if isinstance(chunk, dict):
+                text = chunk.get("embed") or chunk.get("content", "")
+            else:
+                text = getattr(chunk, "embed", None) or chunk.content
             if text:
                 texts.append(text)
 
