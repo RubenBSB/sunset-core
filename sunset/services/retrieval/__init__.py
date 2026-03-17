@@ -340,6 +340,20 @@ class RetrievalService:
 
         Returns the total number of chunks inserted (text + image descriptions).
         """
+        import os
+
+        ext = os.path.splitext(file_path)[1].lower()
+
+        # Plain-text and Markdown files don't need Reducto/Docling parsing.
+        # Read them directly to avoid encoding issues (accented characters)
+        # and unnecessary round-trips.
+        if ext in (".md", ".markdown", ".txt", ".text"):
+            return await self._ingest_document_text(
+                file_path,
+                metadata=metadata,
+                max_tokens=max_tokens,
+            )
+
         if engine == "reducto":
             return await self._ingest_document_reducto(
                 file_path,
@@ -351,18 +365,6 @@ class RetrievalService:
         if engine == "llm":
             return await self._ingest_document_llm(
                 file_path, metadata=metadata, llm_model=llm_model
-            )
-
-        # Plain text files are not supported by Docling's DocumentConverter.
-        # Read them directly and delegate to the raw-text ingest method.
-        import os
-
-        if os.path.splitext(file_path)[1].lower() in (".txt", ".text"):
-            with open(file_path, "r", encoding="utf-8") as f:
-                text = f.read()
-            source_file = os.path.basename(file_path)
-            return await self.ingest(
-                text, source_file, metadata=metadata, max_tokens=max_tokens
             )
 
         from docling.chunking import HybridChunker
@@ -518,6 +520,93 @@ class RetrievalService:
         except Exception:
             logger.warning("Failed to describe image", exc_info=True)
             return None
+
+    # ------------------------------------------------------------------
+    # Ingestion — plain text / Markdown (no external parsing needed)
+    # ------------------------------------------------------------------
+
+    async def _ingest_document_text(
+        self,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 2000,
+    ) -> int:
+        """Read a .md or .txt file directly and chunk by headings / paragraphs."""
+        import os
+        import re
+
+        source_file = os.path.basename(file_path)
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if not content.strip():
+            logger.warning(f"Empty text file: '{source_file}'")
+            return 0
+
+        # Approximate char limit per chunk (≈ 4 chars/token).
+        max_chars = max_tokens * 4
+
+        # Split on markdown headings (keep the heading with its section).
+        sections = re.split(r"(?=^#{1,4}\s)", content, flags=re.MULTILINE)
+
+        # For plain text without headings, split on double newlines instead.
+        if len(sections) <= 1:
+            sections = re.split(r"\n{2,}", content)
+
+        # Build chunks respecting max_chars.
+        chunks: List[str] = []
+        buffer = ""
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            if buffer and len(buffer) + len(section) + 2 > max_chars:
+                chunks.append(buffer)
+                buffer = section
+            else:
+                buffer = buffer + "\n\n" + section if buffer else section
+        if buffer:
+            chunks.append(buffer)
+
+        if not chunks:
+            return 0
+
+        texts = _merge_small_chunks(chunks)
+        embeddings = await self.embed_batch(texts)
+
+        base_metadata = metadata or {}
+        base_metadata["path"] = file_path
+        base_metadata["engine"] = "text"
+        meta_str = json.dumps(base_metadata)
+        now = datetime.now(timezone.utc)
+
+        rows = [
+            (
+                uuid.uuid4(),
+                text,
+                embedding,
+                source_file,
+                meta_str,
+                "text_chunk",
+                None,
+                now,
+            )
+            for text, embedding in zip(texts, embeddings)
+        ]
+
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO knowledge_chunks
+                    (id, content, embedding, source_file, metadata, content_type, headings, created_at)
+                VALUES ($1, $2, $3::vector, $4, $5::jsonb, $6, $7, $8)
+                """,
+                rows,
+            )
+
+        logger.info(f"Ingested {len(rows)} text chunk(s) from '{source_file}'")
+        return len(rows)
 
     # ------------------------------------------------------------------
     # Ingestion — Reducto-powered parsing
