@@ -9,8 +9,6 @@ from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from sunset.services.redis import RedisService
-
 logger = logging.getLogger(__name__)
 
 RATE_LIMITED_ATTR = "_sunset_rate_limited"
@@ -47,14 +45,17 @@ def rate_limit(limit: int = 100, window: int = 60) -> Callable:
                 existing_request_param or "_rl_request"
             )
             if request is not None:
-                redis = RedisService()
                 try:
-                    client = await redis.connect()
+                    redis_svc = getattr(request.app.state, "redis", None)
+                    if redis_svc is None or redis_svc._client is None:
+                        kwargs.pop("_rl_request", None)
+                        return await func(*args, **kwargs)
+                    client = redis_svc.client
                     ip = request.client.host if request.client else "unknown"
                     key = f"rl:{ip}:{request.url.path}"
                     pipe = client.pipeline()
                     pipe.incr(key)
-                    pipe.expire(key, window)
+                    pipe.expire(key, window, nx=True)
                     count, _ = await pipe.execute()
                     if count > limit:
                         ttl = await client.ttl(key)
@@ -114,14 +115,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
 
-        redis = RedisService()
         try:
-            client = await redis.connect()
+            redis_svc = getattr(request.app.state, "redis", None)
+            if redis_svc is None or redis_svc._client is None:
+                return await call_next(request)
+            client = redis_svc.client
             ip = request.client.host if request.client else "unknown"
             key = f"rl:global:{ip}"
             pipe = client.pipeline()
             pipe.incr(key)
-            pipe.expire(key, self.window)
+            pipe.expire(key, self.window, nx=True)
             count, _ = await pipe.execute()
             if count > self.limit:
                 ttl = await client.ttl(key)
