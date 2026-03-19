@@ -14,6 +14,8 @@ __all__ = [
     "ChatService",
     "CrawlService",
     "RedisService",
+    "InstagramService",
+    "YouTubeService",
 ]
 
 
@@ -71,4 +73,12 @@ def __getattr__(name: str):
         from sunset.services.redis import RedisService
 
         return RedisService
+    if name == "InstagramService":
+        from sunset.services.instagram import InstagramService
+
+        return InstagramService
+    if name == "YouTubeService":
+        from sunset.services.youtube import YouTubeService
+
+        return YouTubeService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
