@@ -5,7 +5,7 @@ Generic, reusable service for:
 - Message deduplication
 - Typing indicators
 - Media handling
-- Message sending (Meta Graph API and Twilio)
+- Message sending (Meta Graph API)
 
 Business logic (reply generation) is injected via callback.
 """
@@ -20,7 +20,6 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 import httpx
 from fastapi import HTTPException, status
-from twilio.rest import Client as TwilioClient
 
 from sunset.services.secrets import get_secrets
 
@@ -29,40 +28,6 @@ logger = logging.getLogger(__name__)
 # Type alias for message handler callback
 # Handler receives message data, returns reply text (or None)
 MessageHandler = Callable[[Dict[str, Any]], Awaitable[Optional[str]]]
-
-
-class TwilioService:
-    """Singleton service for Twilio WhatsApp operations."""
-
-    _instance = None
-
-    def __init__(self):
-        self.secrets = get_secrets()
-        account_sid = self.secrets.get_secret("TWILIO_ACCOUNT_SID")
-        auth_token = self.secrets.get_secret("TWILIO_AUTH_TOKEN")
-        self._from_number = self.secrets.get_secret("TWILIO_WHATSAPP_FROM")
-        self._client = TwilioClient(account_sid, auth_token)
-        logger.info("Twilio service initialized")
-
-    @classmethod
-    def get_instance(cls) -> "TwilioService":
-        """Get the singleton instance."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def send_message(self, to: str, body: str) -> None:
-        """Send a WhatsApp message via Twilio."""
-        # Ensure proper whatsapp: prefix
-        from_addr = (
-            self._from_number
-            if self._from_number.startswith("whatsapp:")
-            else f"whatsapp:{self._from_number}"
-        )
-        to_addr = to if to.startswith("whatsapp:") else f"whatsapp:{to}"
-
-        self._client.messages.create(from_=from_addr, to=to_addr, body=body)
-        logger.info(f"Twilio message sent to {to}")
 
 
 class WhatsappService:

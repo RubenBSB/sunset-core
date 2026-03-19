@@ -1,26 +1,15 @@
 # WhatsAppService
 
-WhatsApp messaging via Meta Graph API or Twilio. Handles message deduplication, typing indicators, media downloads, and webhook processing.
+WhatsApp messaging via Meta Graph API. Handles message deduplication, typing indicators, media downloads, and webhook processing.
 
 ## Setup
 
 ### Env Vars
 
-**Meta Graph API** (WhatsAppService):
-
 ```yaml
 secrets:
   WHATSAPP_PHONE_NUMBER_ID: "123456789"
   WHATSAPP_TOKEN: "EAA..."
-```
-
-**Twilio** (TwilioService):
-
-```yaml
-secrets:
-  TWILIO_ACCOUNT_SID: "AC..."
-  TWILIO_AUTH_TOKEN: "..."
-  TWILIO_WHATSAPP_FROM: "+14155238886"
 ```
 
 ## Usage
@@ -54,15 +43,6 @@ async def handle_message(data: dict) -> str | None:
     return f"You said: {data['text']}"
 ```
 
-### Twilio
-
-```python
-from sunset.services.whatsapp import TwilioService
-
-twilio = TwilioService.get_instance()
-twilio.send_message(to="+33612345678", body="Hello from Twilio!")
-```
-
 ## API Reference
 
 ### `WhatsappService`
@@ -78,9 +58,3 @@ Singleton. Reads `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_TOKEN` from secrets.
 ### `extract_webhook_message(body) -> dict | None`
 
 Extract message data from webhook payload. Returns `{id, name, sender, text, image_media_id}`.
-
-### `TwilioService`
-
-Singleton. Reads Twilio credentials from secrets.
-
-- `send_message(to, body) -> None`
