@@ -40,6 +40,11 @@ profile = await ig.get_profile("username")
 posts = await ig.get_posts("username", max_posts=12)
 # -> List[InstagramPost]
 
+# Fetch only posts newer than a cutoff (incremental sync)
+from datetime import datetime, timezone
+since = datetime(2026, 3, 1, tzinfo=timezone.utc)
+new_posts = await ig.get_posts("username", max_posts=50, since=since)
+
 # Fetch single post by shortcode
 post = await ig.get_post("ABC123")
 
@@ -65,7 +70,7 @@ Not a singleton — create per use or keep alive for session reuse.
 ### Key Methods
 
 - `get_profile(username) -> InstagramProfile?`
-- `get_posts(username, max_posts=12) -> List[InstagramPost]`
+- `get_posts(username, max_posts=12, since=None) -> List[InstagramPost]` — if `since` (datetime) is set, stops paginating once posts older than `since` are hit
 - `get_post(shortcode) -> InstagramPost?`
 - `get_post_from_url(url) -> InstagramPost?`
 - `close()` — Close the underlying HTTP client

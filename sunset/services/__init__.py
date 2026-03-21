@@ -16,6 +16,7 @@ __all__ = [
     "RedisService",
     "InstagramService",
     "YouTubeService",
+    "ASRService",
 ]
 
 
@@ -81,4 +82,8 @@ def __getattr__(name: str):
         from sunset.services.youtube import YouTubeService
 
         return YouTubeService
+    if name == "ASRService":
+        from sunset.services.asr import ASRService
+
+        return ASRService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

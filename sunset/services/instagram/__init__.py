@@ -196,9 +196,16 @@ class InstagramService:
         return None
 
     async def get_posts(
-        self, username: str, max_posts: int = 12
+        self,
+        username: str,
+        max_posts: int = 12,
+        since: datetime | None = None,
     ) -> List[InstagramPost]:
-        """Fetch recent posts from an Instagram profile."""
+        """Fetch recent posts from an Instagram profile.
+
+        If `since` is provided, stops paginating once a post older than
+        `since` is encountered and only returns posts newer than `since`.
+        """
         client = await self._get_client()
 
         profile = await self.get_profile(username)
@@ -208,9 +215,10 @@ class InstagramService:
 
         posts: List[InstagramPost] = []
         cursor: Optional[str] = None
+        hit_since_cutoff = False
 
         try:
-            while len(posts) < max_posts:
+            while len(posts) < max_posts and not hit_since_cutoff:
                 variables: dict = {
                     "id": profile.id,
                     "first": min(12, max_posts - len(posts)),
@@ -242,7 +250,16 @@ class InstagramService:
                 for edge in edges:
                     if len(posts) >= max_posts:
                         break
-                    shortcode = (edge.get("node") or {}).get("shortcode")
+                    node = edge.get("node") or {}
+
+                    if since is not None:
+                        ts = node.get("taken_at_timestamp", 0)
+                        post_time = datetime.fromtimestamp(ts, tz=timezone.utc)
+                        if post_time < since:
+                            hit_since_cutoff = True
+                            break
+
+                    shortcode = node.get("shortcode")
                     if shortcode:
                         post = await self.get_post(shortcode)
                         if post:

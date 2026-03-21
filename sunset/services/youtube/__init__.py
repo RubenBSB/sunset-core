@@ -1,12 +1,20 @@
 """YouTube Data API v3 service for fetching channel and video metadata."""
 
+import asyncio
 import logging
+import random
 import re
-from dataclasses import dataclass
+import string
+import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +50,58 @@ class YouTubeChannel:
     uploads_playlist_id: Optional[str] = None
 
 
+@dataclass
+class TranscriptSegment:
+    """A single segment of a video transcript."""
+
+    text: str
+    start: float
+    duration: float
+
+
+@dataclass
+class Transcript:
+    """Full transcript for a YouTube video."""
+
+    video_id: str
+    language: str
+    language_code: str
+    is_generated: bool
+    segments: list[TranscriptSegment] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return " ".join(s.text for s in self.segments)
+
+
+def _build_proxy_url(username: str, password: str) -> str:
+    sess_id = "".join(random.choices(string.digits, k=10))
+    base = username if username.startswith("customer-") else f"customer-{username}"
+    proxy_user = f"{base}-cc-us-sessid-{sess_id}-sesstime-10"
+    encoded_pw = quote(password, safe="")
+    return f"http://{proxy_user}:{encoded_pw}@pr.oxylabs.io:7777"
+
+
 class YouTubeService:
     """Async YouTube Data API v3 client."""
 
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str,
+        proxy_username: Optional[str] = None,
+        proxy_password: Optional[str] = None,
+    ):
         self._api_key = api_key
+        self._proxy_username = proxy_username
+        self._proxy_password = proxy_password
+
+    def _get_proxy_url(self) -> Optional[str]:
+        if self._proxy_username and self._proxy_password:
+            return _build_proxy_url(self._proxy_username, self._proxy_password)
+        return None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=30.0, proxy=self._get_proxy_url())
 
     async def resolve_channel_id(self, identifier: str) -> Optional[str]:
         """Resolve a YouTube URL, handle, or channel ID to a channel ID.
@@ -73,7 +128,7 @@ class YouTubeService:
         else:
             handle = identifier
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with self._http_client() as client:
             resp = await client.get(
                 f"{YT_API_BASE}/channels",
                 params={"key": self._api_key, "forHandle": handle, "part": "id"},
@@ -94,7 +149,7 @@ class YouTubeService:
         if not channel_id:
             return None
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with self._http_client() as client:
             resp = await client.get(
                 f"{YT_API_BASE}/channels",
                 params={
@@ -146,7 +201,7 @@ class YouTubeService:
         if not channel or not channel.uploads_playlist_id:
             return []
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with self._http_client() as client:
             # Fetch playlist items
             resp = await client.get(
                 f"{YT_API_BASE}/playlistItems",
@@ -232,7 +287,7 @@ class YouTubeService:
 
     async def get_video(self, video_id: str) -> Optional[YouTubeVideo]:
         """Fetch a single video by ID."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with self._http_client() as client:
             resp = await client.get(
                 f"{YT_API_BASE}/videos",
                 params={
@@ -284,3 +339,96 @@ class YouTubeService:
             logger.error(f"Invalid YouTube URL: {url}")
             return None
         return await self.get_video(match.group(1))
+
+    @staticmethod
+    def _extract_video_id(video_id_or_url: str) -> str:
+        match = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", video_id_or_url)
+        return match.group(1) if match else video_id_or_url
+
+    async def get_transcript(
+        self,
+        video_id_or_url: str,
+        languages: list[str] | None = None,
+    ) -> Optional[Transcript]:
+        """Fetch the transcript for a video.
+
+        Args:
+            video_id_or_url: Video ID or full YouTube URL.
+            languages: Language codes in descending priority (default: ["en"]).
+        """
+        video_id = self._extract_video_id(video_id_or_url)
+        langs = languages or ["en"]
+
+        try:
+            proxy_url = self._get_proxy_url()
+            proxy_config = (
+                GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
+                if proxy_url
+                else None
+            )
+            ytt = YouTubeTranscriptApi(proxy_config=proxy_config)
+            fetched = await asyncio.to_thread(ytt.fetch, video_id, languages=langs)
+        except Exception as e:
+            logger.error(f"Transcript fetch failed for {video_id}: {e}")
+            return None
+
+        segments = [
+            TranscriptSegment(text=s.text, start=s.start, duration=s.duration)
+            for s in fetched
+        ]
+
+        return Transcript(
+            video_id=video_id,
+            language=fetched.language,
+            language_code=fetched.language_code,
+            is_generated=fetched.is_generated,
+            segments=segments,
+        )
+
+    async def download_audio(
+        self,
+        video_id_or_url: str,
+        codec: str = "mp3",
+        quality: str = "192",
+    ) -> bytes:
+        """Download audio from a YouTube video and return raw bytes.
+
+        Args:
+            video_id_or_url: Video ID or full YouTube URL.
+            codec: Audio codec (mp3, aac, wav, etc.). Default "mp3".
+            quality: Audio quality in kbps. Default "192".
+        """
+        from yt_dlp import YoutubeDL
+
+        video_id = self._extract_video_id(video_id_or_url)
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        def _download(tmp_dir: str) -> Path:
+            opts = {
+                "format": "bestaudio/best",
+                "outtmpl": f"{tmp_dir}/%(id)s.%(ext)s",
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": codec,
+                        "preferredquality": quality,
+                    }
+                ],
+                "quiet": True,
+                "no_warnings": True,
+            }
+            proxy_url = self._get_proxy_url()
+            if proxy_url:
+                opts["proxy"] = proxy_url
+
+            with YoutubeDL(opts) as ydl:
+                ydl.download([url])
+
+            files = list(Path(tmp_dir).glob(f"{video_id}.*"))
+            if not files:
+                raise FileNotFoundError(f"No audio file produced for {video_id}")
+            return files[0]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = await asyncio.to_thread(_download, tmp_dir)
+            return audio_path.read_bytes()
