@@ -18,6 +18,7 @@ __all__ = [
     "YouTubeService",
     "ASRService",
     "ShopifyService",
+    "GoogleDriveService",
 ]
 
 
@@ -91,4 +92,8 @@ def __getattr__(name: str):
         from sunset.services.shopify import ShopifyService
 
         return ShopifyService
+    if name == "GoogleDriveService":
+        from sunset.services.google_drive import GoogleDriveService
+
+        return GoogleDriveService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
