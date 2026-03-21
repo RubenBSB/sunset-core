@@ -17,6 +17,7 @@ __all__ = [
     "InstagramService",
     "YouTubeService",
     "ASRService",
+    "ShopifyService",
 ]
 
 
@@ -86,4 +87,8 @@ def __getattr__(name: str):
         from sunset.services.asr import ASRService
 
         return ASRService
+    if name == "ShopifyService":
+        from sunset.services.shopify import ShopifyService
+
+        return ShopifyService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
