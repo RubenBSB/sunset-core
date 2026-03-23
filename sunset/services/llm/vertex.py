@@ -118,6 +118,24 @@ class VertexAIGeminiService(LLMService):
             )
         return self._store
 
+    _RESPONSE_NOISE_RE = re.compile(
+        r"|".join(
+            [
+                r"c11n_\d+_\w+\(.*?\)[‡†]",
+                r"<ctrl\d+>",
+                r"ccall:\w+:\w+\{.*?\}",
+                r"\[cite_start\]",
+                r"\[cite:\s*\d+\]",
+                r"\[cite_num\]",
+            ]
+        )
+    )
+
+    @classmethod
+    def _clean_response_text(cls, text: str) -> str:
+        """Strip leaked Gemini internal markers from response text."""
+        return cls._RESPONSE_NOISE_RE.sub("", text).strip()
+
     def _parse_data_url(self, data_url: str) -> tuple[bytes, str]:
         """Parse a data URL and return (bytes, mime_type)."""
         match = re.match(r"data:([^;]+);base64,(.+)", data_url)
@@ -287,7 +305,7 @@ class VertexAIGeminiService(LLMService):
                 model, gemini_messages, config, tool_executor, metric_tag
             )
             return LLMResponse(
-                text=response.text or "",
+                text=self._clean_response_text(response.text or ""),
                 cited_chunks=None,
                 tool_calls=tool_calls_made if tool_calls_made else None,
             )
@@ -299,7 +317,7 @@ class VertexAIGeminiService(LLMService):
         self._track_tokens(response, model, "generate_response", metric_tag)
 
         return LLMResponse(
-            text=response.text,
+            text=self._clean_response_text(response.text or ""),
             cited_chunks=None,
             tool_calls=None,
         )
@@ -455,7 +473,7 @@ class VertexAIGeminiService(LLMService):
         logger.info(f"Grounded generation completed. Cited chunks: {len(cited_chunks)}")
 
         return LLMResponse(
-            text=response_text,
+            text=self._clean_response_text(response_text),
             cited_chunks=cited_chunks if cited_chunks else None,
             tool_calls=None,
         )
@@ -609,7 +627,7 @@ class VertexAIGeminiService(LLMService):
         ]
 
         return LLMResponse(
-            text=response.text or "",
+            text=self._clean_response_text(response.text or ""),
             cited_chunks=cited_chunks[:5] if cited_chunks else None,
             tool_calls=tool_calls_made if tool_calls_made else None,
         )
@@ -665,7 +683,7 @@ class VertexAIGeminiService(LLMService):
         )
 
         return LLMResponse(
-            text=response.text or "",
+            text=self._clean_response_text(response.text or ""),
             cited_chunks=grounded["cited_chunks"],
             tool_calls=tool_calls_made if tool_calls_made else None,
         )

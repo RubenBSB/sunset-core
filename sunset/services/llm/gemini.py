@@ -81,6 +81,24 @@ class GeminiService(LLMService):
         except Exception as e:
             logger.warning(f"Failed to track tokens: {e}")
 
+    _RESPONSE_NOISE_RE = re.compile(
+        r"|".join(
+            [
+                r"c11n_\d+_\w+\(.*?\)[‡†]",  # citation markers
+                r"<ctrl\d+>",  # control tokens
+                r"ccall:\w+:\w+\{.*?\}",  # raw tool call leaks
+                r"\[cite_start\]",  # cite_start tags
+                r"\[cite:\s*\d+\]",  # cite: N tags
+                r"\[cite_num\]",  # cite_num tags
+            ]
+        )
+    )
+
+    @classmethod
+    def _clean_response_text(cls, text: str) -> str:
+        """Strip leaked Gemini internal markers from response text."""
+        return cls._RESPONSE_NOISE_RE.sub("", text).strip()
+
     _MIME_SUFFIXES = {
         "application/pdf": ".pdf",
         "image/png": ".png",

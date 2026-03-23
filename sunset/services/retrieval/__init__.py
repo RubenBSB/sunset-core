@@ -54,10 +54,12 @@ def _make_vertex_ai_tokenizer(max_tokens: int = 2000):
     """Create a VertexAITokenizer instance (imports docling lazily)."""
     from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
 
+    _default_max_tokens = max_tokens
+
     class VertexAITokenizer(BaseTokenizer):
         model_config = ConfigDict(arbitrary_types_allowed=True)
 
-        max_tokens: int = max_tokens
+        max_tokens: int = _default_max_tokens
         _local_tokenizer: Any = None
 
         def model_post_init(self, __context: Any) -> None:
@@ -258,9 +260,10 @@ class RetrievalService:
         """
         from docling.chunking import HybridChunker
         from docling_core.types.doc import DoclingDocument
+        from docling_core.types.doc.labels import DocItemLabel
 
         doc = DoclingDocument(name=source_file)
-        doc.add_text(text=text)
+        doc.add_text(label=DocItemLabel.TEXT, text=text)
 
         tokenizer = _make_vertex_ai_tokenizer(max_tokens=max_tokens)
         chunker = HybridChunker(tokenizer=tokenizer, merge_peers=True)
