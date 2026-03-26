@@ -698,15 +698,19 @@ class VertexAIGeminiService(LLMService):
     ) -> Tuple[Any, List[ToolCall]]:
         """Run Vertex AI tool-calling loop. Returns (response, tool_calls_made)."""
         tool_calls_made: List[ToolCall] = []
+        max_iterations = 10
 
         client = self._client_for(model)
-        response = await client.aio.models.generate_content(
-            model=model, contents=gemini_messages, config=config
-        )
 
-        function_calls = self._extract_function_calls(response)
+        for _ in range(max_iterations):
+            response = await client.aio.models.generate_content(
+                model=model, contents=gemini_messages, config=config
+            )
 
-        if function_calls:
+            function_calls = self._extract_function_calls(response)
+            if not function_calls:
+                break
+
             function_response_parts = []
             for fc in function_calls:
                 tool_name = fc.name
@@ -738,10 +742,6 @@ class VertexAIGeminiService(LLMService):
                 gemini_messages.append(response.candidates[0].content)
             gemini_messages.append(
                 types.Content(role="user", parts=function_response_parts)
-            )
-
-            response = await client.aio.models.generate_content(
-                model=model, contents=gemini_messages, config=config
             )
 
         self._track_tokens(response, model, "generate_response", metric_tag)
