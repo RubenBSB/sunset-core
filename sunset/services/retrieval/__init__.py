@@ -660,7 +660,8 @@ class RetrievalService:
             async with httpx.AsyncClient() as http:
                 resp = await http.get(result.result.url)
                 resp.raise_for_status()
-                chunks = resp.json()
+                data = resp.json()
+                chunks = data["chunks"] if isinstance(data, dict) else data
         else:
             chunks = result.result.chunks
         if not chunks:
