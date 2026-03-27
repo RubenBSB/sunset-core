@@ -258,7 +258,7 @@ class RetrievalService:
 
         Returns the number of chunks inserted.
         """
-        from docling.chunking import HybridChunker
+        from docling_core.transforms.chunker import HybridChunker
         from docling_core.types.doc import DoclingDocument
         from docling_core.types.doc.labels import DocItemLabel
 
@@ -370,7 +370,6 @@ class RetrievalService:
                 file_path, metadata=metadata, llm_model=llm_model
             )
 
-        from docling.chunking import HybridChunker
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import (
             AcceleratorDevice,
@@ -378,6 +377,7 @@ class RetrievalService:
             PdfPipelineOptions,
         )
         from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling_core.transforms.chunker import HybridChunker
         from docling_core.types.doc import PictureItem
 
         pipeline_options = PdfPipelineOptions()
