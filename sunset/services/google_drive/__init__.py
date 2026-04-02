@@ -146,6 +146,46 @@ class GoogleDriveService:
 
         return drives
 
+    async def list_shared_with_me(
+        self,
+        access_token: str,
+        folders_only: bool = False,
+    ) -> list[dict]:
+        """List files/folders shared with the user (not in My Drive or shared drives)."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        query = "sharedWithMe=true"
+        if folders_only:
+            query += " and mimeType='application/vnd.google-apps.folder'"
+
+        items: list[dict] = []
+        page_token: str | None = None
+
+        while True:
+            params: dict = {
+                "q": query,
+                "fields": f"nextPageToken, files({FILE_FIELDS})",
+                "pageSize": 1000,
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            resp = await self._client.get(
+                f"{DRIVE_API_BASE}/files",
+                headers=headers,
+                params=params,
+            )
+            _check_response(resp)
+            data = resp.json()
+            items.extend(data.get("files", []))
+
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+
+        return items
+
     async def list_folder_children(
         self,
         access_token: str,
