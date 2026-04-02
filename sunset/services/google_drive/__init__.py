@@ -120,6 +120,32 @@ class GoogleDriveService:
 
     # ── File & Folder Methods ──────────────────────────────────────────
 
+    async def list_shared_drives(self, access_token: str) -> list[dict]:
+        """List all shared drives the user has access to."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        drives: list[dict] = []
+        page_token: str | None = None
+
+        while True:
+            params: dict = {"pageSize": 100}
+            if page_token:
+                params["pageToken"] = page_token
+
+            resp = await self._client.get(
+                f"{DRIVE_API_BASE}/drives",
+                headers=headers,
+                params=params,
+            )
+            _check_response(resp)
+            data = resp.json()
+            drives.extend(data.get("drives", []))
+
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+
+        return drives
+
     async def list_folder_children(
         self,
         access_token: str,
@@ -139,6 +165,8 @@ class GoogleDriveService:
                 "q": query,
                 "fields": f"nextPageToken, files({FILE_FIELDS})",
                 "pageSize": 1000,
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
             }
             if page_token:
                 params["pageToken"] = page_token
@@ -162,7 +190,7 @@ class GoogleDriveService:
         resp = await self._client.get(
             f"{DRIVE_API_BASE}/files/{file_id}",
             headers={"Authorization": f"Bearer {access_token}"},
-            params={"fields": FILE_FIELDS_WITH_TRASHED},
+            params={"fields": FILE_FIELDS_WITH_TRASHED, "supportsAllDrives": "true"},
         )
         _check_response(resp)
         return resp.json()
@@ -173,7 +201,7 @@ class GoogleDriveService:
         resp = await self._client.get(
             f"{DRIVE_API_BASE}/files/{file_id}/export",
             headers={"Authorization": f"Bearer {access_token}"},
-            params={"mimeType": export_mime_type},
+            params={"mimeType": export_mime_type, "supportsAllDrives": "true"},
         )
         _check_response(resp)
         return resp.content
@@ -182,7 +210,7 @@ class GoogleDriveService:
         resp = await self._client.get(
             f"{DRIVE_API_BASE}/files/{file_id}",
             headers={"Authorization": f"Bearer {access_token}"},
-            params={"alt": "media"},
+            params={"alt": "media", "supportsAllDrives": "true"},
         )
         _check_response(resp)
         return resp.content
@@ -237,6 +265,8 @@ class GoogleDriveService:
                     "q": query,
                     "fields": f"nextPageToken, files({FILE_FIELDS})",
                     "pageSize": 1000,
+                    "supportsAllDrives": "true",
+                    "includeItemsFromAllDrives": "true",
                 }
                 if page_token:
                     params["pageToken"] = page_token
@@ -266,6 +296,7 @@ class GoogleDriveService:
         resp = await self._client.get(
             f"{DRIVE_API_BASE}/changes/startPageToken",
             headers={"Authorization": f"Bearer {access_token}"},
+            params={"supportsAllDrives": "true"},
         )
         _check_response(resp)
         return resp.json()["startPageToken"]
@@ -283,6 +314,8 @@ class GoogleDriveService:
                     "pageToken": current_token,
                     "fields": "changes(fileId,file(id,name,mimeType,parents,md5Checksum,size,modifiedTime,trashed),removed),newStartPageToken,nextPageToken",
                     "pageSize": 1000,
+                    "supportsAllDrives": "true",
+                    "includeItemsFromAllDrives": "true",
                 },
             )
             _check_response(resp)
@@ -327,7 +360,7 @@ class GoogleDriveService:
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
             },
-            params={"pageToken": page_token},
+            params={"pageToken": page_token, "supportsAllDrives": "true"},
             json=body,
         )
         _check_response(resp)
