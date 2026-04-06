@@ -74,7 +74,7 @@ def _make_vertex_ai_tokenizer(max_tokens: int = 2000):
             return self.max_tokens
 
         def get_tokenizer(self) -> Any:
-            return self._local_tokenizer
+            return self.count_tokens
 
     return VertexAITokenizer(max_tokens=max_tokens)
 
