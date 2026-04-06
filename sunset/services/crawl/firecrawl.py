@@ -74,7 +74,7 @@ class FirecrawlService(CrawlService):
 
         # Use the blocking crawl() which auto-paginates and aggregates all docs
         result = await client.crawl(
-            url,
+            url=url,
             poll_interval=self.poll_interval,
             timeout=self.timeout,
             **crawl_params,
