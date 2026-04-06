@@ -72,23 +72,24 @@ class FirecrawlService(CrawlService):
         if prompt:
             crawl_params["prompt"] = prompt
 
-        job = await client.start_crawl(url, **crawl_params)
-
-        pages: list[CrawlPage] = []
-        async for snapshot in client.watcher(
-            job.id,
-            kind="crawl",
+        # Use the blocking crawl() which auto-paginates and aggregates all docs
+        result = await client.crawl(
+            url,
             poll_interval=self.poll_interval,
             timeout=self.timeout,
-        ):
-            if snapshot.status == "completed":
-                pages = self._parse_pages(snapshot.data or [], output_format)
-                break
-            elif snapshot.status == "failed":
-                logger.error(f"Firecrawl job {job.id} failed")
-                break
-            else:
-                logger.info(f"Crawling: {snapshot.completed}/{snapshot.total} pages")
+            **crawl_params,
+        )
+
+        data = getattr(result, "data", None) or []
+        pages = self._parse_pages(data, output_format)
+
+        if not pages:
+            logger.warning(
+                "Firecrawl crawl returned no pages (status=%s, total=%s, completed=%s)",
+                getattr(result, "status", None),
+                getattr(result, "total", None),
+                getattr(result, "completed", None),
+            )
 
         output = self._aggregate(pages, output_format)
         return CrawlResult(pages=pages, files=[], output=output)
@@ -106,8 +107,6 @@ class FirecrawlService(CrawlService):
             if prompt:
                 json_fmt["prompt"] = prompt
             return [json_fmt]
-        if output_format == OutputFormat.TEXT:
-            return ["markdown"]
         return ["markdown"]
 
     def _parse_pages(self, data: list, output_format: OutputFormat) -> list[CrawlPage]:
