@@ -1,12 +1,25 @@
 # CrawlService
 
-BFS website crawler using Playwright (async). Renders JS-heavy pages, converts to markdown, and extracts text from linked files (PDF, etc.).
+Website crawler with pluggable backends. Ships with two implementations:
+
+- **FirecrawlService** — Uses the [Firecrawl](https://firecrawl.dev) API. Handles JS rendering, rate limiting, and structured extraction server-side.
+- **PlaywrightCrawlService** — Local BFS crawler using Playwright. Renders JS pages, converts to markdown, and extracts text from linked files (PDF, etc.).
+
+Both inherit from the abstract `CrawlService` base class.
 
 ## Setup
 
-### Extra Dependencies
+### FirecrawlService
 
-The child project's `requirements.txt` needs:
+```
+firecrawl-py
+```
+
+| Env Var | Description |
+|---------|-------------|
+| `FIRECRAWL_API_KEY` | Firecrawl API key (or pass directly to constructor) |
+
+### PlaywrightCrawlService
 
 ```
 playwright
@@ -23,71 +36,115 @@ playwright install chromium
 
 ## Usage
 
-```python
-from sunset.services import CrawlService
+### FirecrawlService
 
-crawl = CrawlService(
-    max_depth=2,
-    max_pages=50,
-    output_format="md",
-    request_delay=0.5,
+```python
+from sunset.services.crawl import FirecrawlService, OutputFormat
+
+crawl = FirecrawlService()
+
+# Markdown output (default)
+result = await crawl.crawl("https://example.com", max_depth=2, max_pages=100)
+print(result.output)
+
+# Plain text
+result = await crawl.crawl(
+    "https://example.com",
+    output_format=OutputFormat.TEXT,
 )
 
-# Crawl from seed URLs
-result = await crawl.crawl(["https://example.com"])
-
-# Aggregated markdown of all pages + files
-print(result.markdown)
-
-# Iterate individual pages
+# Structured JSON extraction with schema
+result = await crawl.crawl(
+    "https://example.com/products",
+    output_format=OutputFormat.JSON,
+    json_schema={
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "price": {"type": "number"},
+        },
+    },
+    prompt="Extract the product title and price",
+)
 for page in result.pages:
-    if page.failed:
-        print(f"FAILED {page.url}: {page.error}")
-    else:
+    print(page.json_data)
+
+# Exclude paths and guide the crawl with a prompt
+result = await crawl.crawl(
+    "https://docs.example.com",
+    exclude_paths=["blog/.*", "changelog/.*"],
+    prompt="Focus on API reference pages",
+    max_depth=3,
+)
+```
+
+### PlaywrightCrawlService
+
+```python
+from sunset.services.crawl import PlaywrightCrawlService, OutputFormat
+
+crawl = PlaywrightCrawlService(request_delay=0.5)
+
+result = await crawl.crawl("https://example.com", max_depth=2, max_pages=50)
+print(result.output)
+
+# Iterate pages and downloaded files
+for page in result.pages:
+    if not page.failed:
         print(f"{page.title} ({len(page.links)} links)")
 
-# Iterate downloaded files
 for file in result.files:
-    if file.failed:
-        print(f"FAILED {file.filename}: {file.error}")
-    else:
-        print(f"{file.filename}: {len(file.content)} chars")
+    print(f"{file.filename}: {len(file.content)} chars")
 
-# Restrict to specific domains
-crawl = CrawlService(allowed_domains=["docs.example.com", "api.example.com"])
-result = await crawl.crawl(["https://docs.example.com/guide"])
-
-# Plain text output instead of markdown
-crawl = CrawlService(output_format="text")
-result = await crawl.crawl(["https://example.com"])
-
-# Cleanup
 await crawl.close()
 ```
 
 ## API Reference
 
-### Constructor
+### Base `crawl()` signature
+
+```python
+async def crawl(
+    url: str,
+    *,
+    exclude_paths: list[str] | None = None,   # Regex patterns to exclude
+    max_depth: int = 2,
+    max_pages: int = 50,
+    output_format: OutputFormat = OutputFormat.MARKDOWN,  # MARKDOWN, TEXT, or JSON
+    json_schema: dict | None = None,           # JSON Schema for structured extraction
+    prompt: str | None = None,                 # Guide the crawl / extraction
+) -> CrawlResult
+```
+
+### OutputFormat
+
+| Value | Description |
+|-------|-------------|
+| `OutputFormat.MARKDOWN` | Markdown output (default) |
+| `OutputFormat.TEXT` | Plain text |
+| `OutputFormat.JSON` | Structured JSON extraction (requires `json_schema` and/or `prompt`) |
+
+### FirecrawlService constructor
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `max_depth` | `int` | `2` | Maximum BFS depth from seed URLs |
-| `max_pages` | `int` | `50` | Safety cap on total pages to visit |
-| `output_format` | `str` | `"md"` | `"md"` for markdown, `"text"` for plain text |
-| `allowed_domains` | `list[str] \| None` | `None` | Restrict crawling to these domains. `None` auto-detects from seed URLs |
+| `api_key` | `str \| None` | `None` | API key (falls back to `FIRECRAWL_API_KEY` env var) |
+| `only_main_content` | `bool` | `True` | Strip headers/navs/footers |
+| `request_delay` | `float \| None` | `None` | Seconds between scrapes |
+| `poll_interval` | `int` | `2` | Seconds between status checks |
+| `timeout` | `int` | `120` | Max seconds to wait for completion |
+
+### PlaywrightCrawlService constructor
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `allowed_domains` | `list[str] \| None` | `None` | Restrict crawling to these domains. `None` auto-detects |
 | `request_delay` | `float` | `0.5` | Seconds between page loads |
 | `headless` | `bool` | `True` | Run browser in headless mode |
 | `timeout` | `int` | `30000` | Page navigation timeout in milliseconds |
 
-### Key Methods
-
-- `crawl(urls) -> CrawlResult` — BFS-crawl from seed URLs. Returns pages, files, and aggregated markdown (async)
-- `close()` — Close the Playwright browser (async)
-
 ### Data Classes
 
-- `CrawlPage` — `url`, `title`, `content`, `depth`, `links`, `error`, `failed` (property)
-- `CrawlFile` — `url`, `filename`, `content`, `mime_type`, `source_page`, `error`, `failed` (property)
-- `CrawlResult` — `pages: list[CrawlPage]`, `files: list[CrawlFile]`, `markdown: str`
-
-Failed pages/files have `error` set (non-None) and `failed == True`. They are included in results for traceability.
+- **`CrawlPage`** — `url`, `title`, `content`, `depth`, `json_data`, `links`, `error`, `failed`
+- **`CrawlFile`** — `url`, `filename`, `content`, `mime_type`, `source_page`, `error`, `failed`
+- **`CrawlResult`** — `pages: list[CrawlPage]`, `files: list[CrawlFile]`, `output: str`

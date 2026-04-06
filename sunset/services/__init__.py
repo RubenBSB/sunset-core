@@ -13,6 +13,8 @@ __all__ = [
     "RetrievalService",
     "ChatService",
     "CrawlService",
+    "FirecrawlService",
+    "PlaywrightCrawlService",
     "RedisService",
     "InstagramService",
     "YouTubeService",
@@ -72,6 +74,14 @@ def __getattr__(name: str):
         from sunset.services.crawl import CrawlService
 
         return CrawlService
+    if name == "FirecrawlService":
+        from sunset.services.crawl import FirecrawlService
+
+        return FirecrawlService
+    if name == "PlaywrightCrawlService":
+        from sunset.services.crawl import PlaywrightCrawlService
+
+        return PlaywrightCrawlService
     if name == "RedisService":
         from sunset.services.redis import RedisService
 
