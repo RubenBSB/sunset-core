@@ -235,13 +235,18 @@ class RetrievalService:
         return list(response.embeddings[0].values)
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Embed multiple texts in a single API call."""
-        response = await self._genai.aio.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=texts,
-            config={"output_dimensionality": EMBEDDING_DIMENSIONS},
-        )
-        return [list(e.values) for e in response.embeddings]
+        """Embed multiple texts, batching to stay within API limits."""
+        _MAX_BATCH = 250
+        all_embeddings: List[List[float]] = []
+        for i in range(0, len(texts), _MAX_BATCH):
+            batch = texts[i : i + _MAX_BATCH]
+            response = await self._genai.aio.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=batch,
+                config={"output_dimensionality": EMBEDDING_DIMENSIONS},
+            )
+            all_embeddings.extend(list(e.values) for e in response.embeddings)
+        return all_embeddings
 
     # ------------------------------------------------------------------
     # Ingestion — raw text (backwards-compatible)
