@@ -3,7 +3,7 @@
 Website crawler with pluggable backends. Ships with two implementations:
 
 - **FirecrawlService** — Uses the [Firecrawl](https://firecrawl.dev) API. Handles JS rendering, rate limiting, and structured extraction server-side.
-- **PlaywrightCrawlService** — Local BFS crawler using Playwright. Renders JS pages, converts to markdown, and extracts text from linked files (PDF, etc.).
+- **PlaywrightCrawlService** — Local BFS crawler using Playwright. Discovers URLs via sitemap + BFS, renders JS pages, converts to markdown with noise cleanup, and extracts text from linked files (PDF, etc.).
 
 Both inherit from the abstract `CrawlService` base class.
 
@@ -26,6 +26,7 @@ playwright
 markdownify
 beautifulsoup4
 pymupdf
+httpx
 ```
 
 After installing, run:
@@ -85,8 +86,19 @@ from sunset.services.crawl import PlaywrightCrawlService, OutputFormat
 
 crawl = PlaywrightCrawlService(request_delay=0.5)
 
+# Crawls sitemap first, then BFS — output is cleaned markdown
 result = await crawl.crawl("https://example.com", max_depth=2, max_pages=50)
 print(result.output)
+
+# Disable sitemap discovery for faster targeted crawls
+crawl = PlaywrightCrawlService(discover_sitemap=False)
+result = await crawl.crawl("https://example.com/docs", max_depth=1)
+
+# Add custom noise patterns to strip from output
+crawl = PlaywrightCrawlService(
+    noise_patterns=[r"^Subscribe now$", r"^Download PDF$"],
+)
+result = await crawl.crawl("https://example.com", max_pages=100)
 
 # Iterate pages and downloaded files
 for page in result.pages:
@@ -142,6 +154,8 @@ async def crawl(
 | `request_delay` | `float` | `0.5` | Seconds between page loads |
 | `headless` | `bool` | `True` | Run browser in headless mode |
 | `timeout` | `int` | `30000` | Page navigation timeout in milliseconds |
+| `discover_sitemap` | `bool` | `True` | Parse robots.txt / sitemap.xml to seed the BFS queue |
+| `noise_patterns` | `list[str] \| None` | `None` | Extra regex patterns to strip from output (built-in CTA/nav patterns always applied) |
 
 ### Data Classes
 

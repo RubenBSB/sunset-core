@@ -1,15 +1,19 @@
 """Website crawling service using Playwright for JS-rendered pages.
 
-BFS-crawls from seed URLs, converts pages to markdown, and extracts
-text from linked files (PDF, DOCX, etc.).
+BFS-crawls from seed URLs with optional sitemap discovery, converts
+pages to markdown, and extracts text from linked files (PDF, DOCX, etc.).
 """
 
 import asyncio
 import logging
 import os
+import re
+import xml.etree.ElementTree as ET
 from collections import deque
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
+
+import httpx
 
 from .base import CrawlFile, CrawlPage, CrawlResult, CrawlService, OutputFormat
 
@@ -27,13 +31,75 @@ _FILE_EXTENSIONS = {
     ".txt",
 }
 
+_SKIP_EXTENSIONS = {
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".mp4",
+    ".mp3",
+    ".zip",
+    ".rar",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".css",
+    ".js",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+}
+
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+_NOISE_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"^Brochure$",
+        r"^Lire la suite$",
+        r"^Voir le projet$",
+        r"^En savoir plus$",
+        r"^En savoir \+$",
+        r"^Decouvrir$",
+        r"^Retour$",
+        r"^Partager$",
+        r"^Suivant$",
+        r"^Precedent$",
+        r"^Fermer$",
+        r"^Menu$",
+        r"^Rechercher$",
+        r"^Accueil$",
+        r"^S'inscrire$",
+        r"^Candidater$",
+        r"^Nous Rencontrer$",
+        r"^Telecharger$",
+        r"^Je m'inscris$",
+        r"^Voir egalement$",
+    ]
+]
+
 
 def _normalize_url(url: str) -> str:
     parsed = urlparse(url)
+    scheme = "https"
+    netloc = parsed.netloc.lower()
+    if not netloc.startswith("www."):
+        netloc = f"www.{netloc}"
     path = parsed.path.rstrip("/") or "/"
-    return urlunparse(
-        (parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, "")
-    )
+    return urlunparse((scheme, netloc, path, "", parsed.query, ""))
 
 
 def _is_file_url(url: str) -> bool:
@@ -41,8 +107,93 @@ def _is_file_url(url: str) -> bool:
     return any(path.endswith(ext) for ext in _FILE_EXTENSIONS)
 
 
+def _should_skip(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return any(path.endswith(ext) for ext in _SKIP_EXTENSIONS)
+
+
 def _extract_domain(url: str) -> str:
     return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _is_same_domain(url: str, domains: set[str]) -> bool:
+    return _extract_domain(url) in domains
+
+
+def _clean_noise(text: str) -> str:
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if any(rx.match(stripped) for rx in _NOISE_PATTERNS):
+            continue
+        if stripped.startswith("- "):
+            bullet_text = stripped[2:].strip()
+            if any(rx.match(bullet_text) for rx in _NOISE_PATTERNS):
+                continue
+        cleaned.append(line)
+    # Collapse runs of 3+ blank lines
+    result = []
+    blank_count = 0
+    for line in cleaned:
+        if line.strip() == "":
+            blank_count += 1
+            if blank_count <= 2:
+                result.append(line)
+        else:
+            blank_count = 0
+            result.append(line)
+    return "\n".join(result)
+
+
+async def _discover_sitemap_urls(
+    base_url: str, domains: set[str], timeout: int = 15
+) -> set[str]:
+    urls: set[str] = set()
+    sitemap_locations = [
+        f"{base_url}/sitemap.xml",
+        f"{base_url}/sitemap_index.xml",
+    ]
+
+    async with httpx.AsyncClient(
+        headers=_DEFAULT_HEADERS, timeout=timeout, follow_redirects=True
+    ) as client:
+        # Check robots.txt for sitemap references
+        try:
+            resp = await client.get(f"{base_url}/robots.txt")
+            if resp.is_success:
+                for line in resp.text.splitlines():
+                    if line.lower().startswith("sitemap:"):
+                        sitemap_locations.append(line.split(":", 1)[1].strip())
+        except Exception:
+            pass
+
+        visited_sitemaps: set[str] = set()
+
+        async def parse_sitemap(sitemap_url: str) -> None:
+            if sitemap_url in visited_sitemaps:
+                return
+            visited_sitemaps.add(sitemap_url)
+            try:
+                resp = await client.get(sitemap_url)
+                if not resp.is_success:
+                    return
+                root = ET.fromstring(resp.content)
+                ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+                for child_sitemap in root.findall(".//sm:sitemap/sm:loc", ns):
+                    await parse_sitemap(child_sitemap.text.strip())
+                for loc in root.findall(".//sm:url/sm:loc", ns):
+                    url = loc.text.strip()
+                    if _is_same_domain(url, domains):
+                        urls.add(_normalize_url(url))
+            except Exception:
+                pass
+
+        for loc in sitemap_locations:
+            await parse_sitemap(loc)
+
+    logger.info("Sitemap discovery found %d URLs", len(urls))
+    return urls
 
 
 class PlaywrightCrawlService(CrawlService):
@@ -54,6 +205,10 @@ class PlaywrightCrawlService(CrawlService):
         request_delay: Seconds to wait between page loads.
         headless: Run Playwright browser in headless mode.
         timeout: Page navigation timeout in milliseconds.
+        discover_sitemap: Parse robots.txt / sitemap.xml to seed the
+            BFS queue before crawling.
+        noise_patterns: Extra regex patterns to strip from output.
+            Built-in CTA/nav patterns are always applied.
     """
 
     def __init__(
@@ -63,11 +218,19 @@ class PlaywrightCrawlService(CrawlService):
         request_delay: float = 0.5,
         headless: bool = True,
         timeout: int = 30_000,
+        discover_sitemap: bool = True,
+        noise_patterns: list[str] | None = None,
     ):
         self.allowed_domains = allowed_domains
         self.request_delay = request_delay
         self.headless = headless
         self.timeout = timeout
+        self.discover_sitemap = discover_sitemap
+        self._extra_noise = (
+            [re.compile(p, re.IGNORECASE) for p in noise_patterns]
+            if noise_patterns
+            else []
+        )
         self._playwright = None
         self._browser = None
 
@@ -121,6 +284,15 @@ class PlaywrightCrawlService(CrawlService):
         queue.append((normalized, 0))
         visited.add(normalized)
 
+        # Seed queue from sitemap discovery
+        if self.discover_sitemap:
+            sitemap_urls = await _discover_sitemap_urls(url, domains)
+            for surl in sitemap_urls:
+                if surl not in visited and not _should_skip(surl):
+                    if not self._is_excluded(surl, exclude_patterns):
+                        visited.add(surl)
+                        queue.append((surl, 0))
+
         context = await self._browser.new_context()
         page = await context.new_page()
 
@@ -135,13 +307,15 @@ class PlaywrightCrawlService(CrawlService):
 
                 if not crawl_page.failed:
                     for link in crawl_page.links:
-                        link_domain = _extract_domain(link)
-                        if link_domain not in domains:
+                        if not _is_same_domain(link, domains):
                             continue
                         if self._is_excluded(link, exclude_patterns):
                             continue
 
                         normalized_link = _normalize_url(link)
+
+                        if _should_skip(normalized_link):
+                            continue
 
                         if _is_file_url(normalized_link):
                             if normalized_link not in file_urls_seen:
@@ -161,6 +335,14 @@ class PlaywrightCrawlService(CrawlService):
             await context.close()
 
         output = self._aggregate(pages, files, output_format)
+        output = _clean_noise(output)
+        if self._extra_noise:
+            lines = output.split("\n")
+            output = "\n".join(
+                line
+                for line in lines
+                if not any(rx.match(line.strip()) for rx in self._extra_noise)
+            )
         return CrawlResult(pages=pages, files=files, output=output)
 
     @staticmethod
@@ -214,8 +396,29 @@ class PlaywrightCrawlService(CrawlService):
 
             for tag in soup.select("script, style, nav, footer, header, noscript"):
                 tag.decompose()
+            for selector in [
+                "[class*='cookie']",
+                "[class*='popup']",
+                "[class*='modal']",
+                "[class*='sidebar']",
+                "[class*='widget']",
+                "[class*='banner']",
+                "[id*='cookie']",
+                "[id*='popup']",
+                "[id*='modal']",
+                "[class*='menu']",
+                "[class*='breadcrumb']",
+                "[class*='share']",
+                "[class*='social']",
+            ]:
+                for el in soup.select(selector):
+                    el.decompose()
 
             main = soup.select_one("main, [role='main'], article, .content")
+            if not main:
+                main = soup.find("div", class_=re.compile(r"content|main|page", re.I))
+            if not main:
+                main = soup.find("div", id=re.compile(r"content|main|page", re.I))
             content_root = main or soup.find("body") or soup
             content_html = str(content_root)
 
@@ -223,6 +426,13 @@ class PlaywrightCrawlService(CrawlService):
                 content = markdownify(content_html, strip=["img"]).strip()
             else:
                 content = content_root.get_text(separator="\n", strip=True)
+
+            # Deduplicate consecutive identical lines
+            deduped = []
+            for line in content.split("\n"):
+                if not deduped or line.strip() != deduped[-1].strip():
+                    deduped.append(line)
+            content = "\n".join(deduped)
 
             logger.info(f"Crawled: {url} (depth={depth}, links={len(links)})")
             return CrawlPage(
