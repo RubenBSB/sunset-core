@@ -300,6 +300,9 @@ class PlaywrightCrawlService(CrawlService):
             while queue and len(pages) < max_pages:
                 current_url, depth = queue.popleft()
 
+                if self._is_excluded(current_url, exclude_patterns):
+                    continue
+
                 crawl_page = await self._visit_page(
                     page, current_url, depth, output_format, markdownify, BeautifulSoup
                 )
