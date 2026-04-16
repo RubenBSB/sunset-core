@@ -604,10 +604,13 @@ class GeminiService(LLMService):
                         "response_language": {
                             "type": "string",
                             "description": (
-                                "The language of the user's most recent message, as an ISO 639-1 "
-                                "code (e.g. 'en', 'fr', 'es', 'de'). Your final reply MUST be "
-                                "written in this language, regardless of the language of the "
-                                "retrieved content."
+                                "The dominant language of the conversation so far, as an ISO "
+                                "639-1 code (e.g. 'en', 'fr', 'es', 'de'). Base this on the full "
+                                "conversation, not just the last message — short or ambiguous "
+                                "turns (e.g. 'in toulouse', 'ok', proper nouns) do NOT change "
+                                "the language. Only change languages if the user clearly and "
+                                "deliberately switched. Your final reply MUST be written in this "
+                                "language, regardless of the language of the retrieved content."
                             ),
                         },
                         "query": {
