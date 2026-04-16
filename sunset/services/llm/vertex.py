@@ -564,12 +564,21 @@ class VertexAIGeminiService(LLMService):
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "response_language": {
+                            "type": "string",
+                            "description": (
+                                "The language of the user's most recent message, as an ISO 639-1 "
+                                "code (e.g. 'en', 'fr', 'es', 'de'). Your final reply MUST be "
+                                "written in this language, regardless of the language of the "
+                                "retrieved content."
+                            ),
+                        },
                         "query": {
                             "type": "string",
                             "description": "Search query",
-                        }
+                        },
                     },
-                    "required": ["query"],
+                    "required": ["response_language", "query"],
                 },
             },
         }
@@ -578,9 +587,18 @@ class VertexAIGeminiService(LLMService):
 
         async def composite_executor(name: str, args: dict):
             if name == "search_knowledge":
+                response_language = (
+                    args.get("response_language") or "the user's language"
+                )
                 chunks = await self.retrieval.query(args["query"], top_k=5)
                 retrieved_chunks.extend(chunks)
                 return {
+                    "language_reminder": (
+                        f"The retrieved content may be in a different language than the user. "
+                        f"Your final reply MUST be written in '{response_language}'. "
+                        f"Translate any content inline as needed — never switch languages on "
+                        f"the user, and never mix languages in a single reply."
+                    ),
                     "results": [
                         {
                             "content": c["content"],
@@ -588,7 +606,7 @@ class VertexAIGeminiService(LLMService):
                             "score": c["score"],
                         }
                         for c in chunks
-                    ]
+                    ],
                 }
             if extra_executor:
                 return await extra_executor(name, args)
