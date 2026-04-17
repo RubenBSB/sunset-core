@@ -112,3 +112,45 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 - `revoke_refresh_token(raw_token, session)` (async)
 - `set_refresh_cookie(response, raw_token)` / `clear_refresh_cookie(response)`
 - `generate_mfa_secret() -> str` / `verify_mfa_code(secret, code) -> bool`
+
+## OAuth / OIDC
+
+`OAuthRegistry` wraps authlib's `OAuth()` with the "register multiple providers from a secrets backend, skip if unconfigured" pattern. Provider presets (`GOOGLE_OIDC`, `MICROSOFT_OIDC`, `APPLE_OIDC`) ship with the discovery URLs, default secret names, and claim mappings so projects don't retype them.
+
+```python
+from sunset.services.auth import OAuthRegistry, GOOGLE_OIDC, MICROSOFT_OIDC
+from sunset.services import SecretsService
+
+secrets = SecretsService()
+
+registry = OAuthRegistry(
+    backend_url=os.environ["BACKEND_URL"],
+    providers={"google": GOOGLE_OIDC, "microsoft": MICROSOFT_OIDC},
+    get_secret=secrets.get_secret,
+)
+
+# Look up a provider in your /auth/{provider}/login route
+client, config = registry.get("google")
+redirect_uri = f"{os.environ['BACKEND_URL']}/auth/google/callback"
+return await client.authorize_redirect(request, redirect_uri)
+
+# In your /auth/{provider}/callback route
+token = await client.authorize_access_token(request)
+user_info = token.get("userinfo")
+provider_user_id = user_info[config["id_claim"]]  # "sub" for Google
+```
+
+### Provider presets
+
+| Preset | `id_field` | `id_claim` | Secrets expected |
+|--------|-----------|-----------|------------------|
+| `GOOGLE_OIDC` | `google_id` | `sub` | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` |
+| `MICROSOFT_OIDC` | `microsoft_id` | `oid` | `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_SECRET` |
+| `APPLE_OIDC` | `apple_id` | `sub` | `APPLE_OAUTH_CLIENT_ID`, `APPLE_OAUTH_CLIENT_SECRET` |
+
+Override any field by spreading the preset: `{**GOOGLE_OIDC, "client_id_secret": "MY_GOOGLE_ID"}`.
+
+### `OAuthRegistry` methods
+
+- `registry.get(name) -> (client, config)` — raises `ValueError` if unknown/unconfigured
+- `registry.has(name) -> bool` — check before using

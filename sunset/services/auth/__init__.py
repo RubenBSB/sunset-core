@@ -35,10 +35,11 @@ import hashlib
 import logging
 import secrets as secrets_mod
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import argon2
 import pyotp
+from authlib.integrations.starlette_client import OAuth
 from jose import JWTError, jwt
 from sqlalchemy import select, update
 
@@ -284,7 +285,7 @@ class AuthService:
         Model = self.refresh_token_model
         await session.execute(
             update(Model)
-            .where(Model.user_id == user_id, not Model.revoked)
+            .where(Model.user_id == user_id, Model.revoked == False)  # noqa: E712
             .values(revoked=True)
         )
         await session.commit()
@@ -367,6 +368,119 @@ class AuthService:
         """Get the current valid TOTP code (for testing purposes)."""
         totp = pyotp.TOTP(secret)
         return totp.now()
+
+
+# =========================================================================
+# OAuth / OIDC
+# =========================================================================
+
+GOOGLE_OIDC = {
+    "server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+    "client_id_secret": "GOOGLE_OAUTH_CLIENT_ID",
+    "client_secret_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
+    "id_field": "google_id",
+    "id_claim": "sub",
+}
+
+MICROSOFT_OIDC = {
+    "server_metadata_url": "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+    "client_id_secret": "MICROSOFT_OAUTH_CLIENT_ID",
+    "client_secret_secret": "MICROSOFT_OAUTH_CLIENT_SECRET",
+    "id_field": "microsoft_id",
+    "id_claim": "oid",
+    "claims_options": {"iss": {"essential": False}},
+}
+
+APPLE_OIDC = {
+    "server_metadata_url": "https://appleid.apple.com/.well-known/openid-configuration",
+    "client_id_secret": "APPLE_OAUTH_CLIENT_ID",
+    "client_secret_secret": "APPLE_OAUTH_CLIENT_SECRET",
+    "id_field": "apple_id",
+    "id_claim": "sub",
+}
+
+
+class OAuthRegistry:
+    """Registers authlib OIDC clients for a set of providers.
+
+    Each provider config is a dict with:
+        server_metadata_url: OIDC discovery endpoint
+        client_id_secret:    name of the secret holding the client id
+        client_secret_secret:name of the secret holding the client secret
+        id_field:            attr name on your User model (e.g. "google_id")
+        id_claim:            JWT claim holding the provider user id (e.g. "sub")
+        scope:               (optional) OAuth scope, default "openid email profile"
+        claims_options:      (optional) passed through to authlib
+
+    Usage:
+        from sunset.services.auth import OAuthRegistry, GOOGLE_OIDC, MICROSOFT_OIDC
+        from sunset.services import SecretsService
+
+        secrets = SecretsService()
+        registry = OAuthRegistry(
+            backend_url=os.environ["BACKEND_URL"],
+            providers={"google": GOOGLE_OIDC, "microsoft": MICROSOFT_OIDC},
+            get_secret=secrets.get_secret,
+        )
+        client, config = registry.get("google")
+    """
+
+    def __init__(
+        self,
+        backend_url: str,
+        providers: dict,
+        get_secret: Callable[[str], str],
+        skip_if_missing: bool = True,
+        callback_path_template: str = "/auth/{provider}/callback",
+    ):
+        self._providers = providers
+        self._oauth = OAuth()
+        backend_url = backend_url.rstrip("/")
+        for name, config in providers.items():
+            try:
+                client_id = get_secret(config["client_id_secret"])
+                client_secret = get_secret(config["client_secret_secret"])
+            except Exception as e:
+                if skip_if_missing:
+                    logger.warning(f"Skipping OAuth provider '{name}': {e}")
+                    continue
+                raise
+            kwargs = dict(
+                name=name,
+                server_metadata_url=config["server_metadata_url"],
+                client_id=client_id,
+                client_secret=client_secret,
+                client_kwargs={
+                    "scope": config.get("scope", "openid email profile"),
+                    "redirect_uri": backend_url
+                    + callback_path_template.format(provider=name),
+                },
+            )
+            if "claims_options" in config:
+                kwargs["claims_options"] = config["claims_options"]
+            self._oauth.register(**kwargs)
+
+    def get(self, name: str):
+        """Return (authlib_client, provider_config). Raises ValueError if missing."""
+        if name not in self._providers:
+            raise ValueError(f"Unknown OAuth provider: {name}")
+        try:
+            client = getattr(self._oauth, name)
+        except AttributeError:
+            raise ValueError(
+                f"OAuth provider '{name}' is not configured (secrets missing?)"
+            )
+        return client, self._providers[name]
+
+    def has(self, name: str) -> bool:
+        """True if the provider is registered and ready to use."""
+        if name not in self._providers:
+            return False
+        try:
+            getattr(self._oauth, name)
+            return True
+        except AttributeError:
+            return False
 
 
 # Singleton instance
