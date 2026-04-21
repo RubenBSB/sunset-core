@@ -13,6 +13,45 @@ logger = logging.getLogger(__name__)
 
 RATE_LIMITED_ATTR = "_sunset_rate_limited"
 
+# Number of proxies between the app and the internet that we trust to set
+# X-Forwarded-For correctly. 1 is right for Cloud Run without an external
+# load balancer (the Google Front End appends the real client IP as the last
+# XFF entry). Bump to 2 if you put an external HTTPS LB / Cloud Armor in front.
+DEFAULT_TRUSTED_PROXIES = 1
+
+
+def get_client_ip(
+    request: Request, trusted_proxies: int = DEFAULT_TRUSTED_PROXIES
+) -> str:
+    """Extract the real client IP, resistant to X-Forwarded-For spoofing.
+
+    XFF is a comma-separated list. Anything the client sent is preserved on
+    the left; our infra appends the real peer on the right. Only the last
+    `trusted_proxies` entries are trustworthy — everything before that is
+    attacker-controlled.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            idx = max(0, len(parts) - trusted_proxies)
+            return parts[idx]
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def get_client_identity(
+    request: Request, trusted_proxies: int = DEFAULT_TRUSTED_PROXIES
+) -> str:
+    """Identity key for rate limiting. Prefers a widget/session header over IP,
+    since IP collapses all users behind a NAT or proxy into one bucket.
+    """
+    session_id = request.headers.get("x-session-id")
+    if session_id:
+        return f"s:{session_id[:64]}"
+    return f"ip:{get_client_ip(request, trusted_proxies)}"
+
 
 def rate_limit(limit: int = 100, window: int = 60) -> Callable:
     """
@@ -51,8 +90,8 @@ def rate_limit(limit: int = 100, window: int = 60) -> Callable:
                         kwargs.pop("_rl_request", None)
                         return await func(*args, **kwargs)
                     client = redis_svc.client
-                    ip = request.client.host if request.client else "unknown"
-                    key = f"rl:{ip}:{request.url.path}"
+                    identity = get_client_identity(request)
+                    key = f"rl:{identity}:{request.url.path}"
                     pipe = client.pipeline()
                     pipe.incr(key)
                     pipe.expire(key, window, nx=True)
@@ -120,8 +159,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if redis_svc is None or redis_svc._client is None:
                 return await call_next(request)
             client = redis_svc.client
-            ip = request.client.host if request.client else "unknown"
-            key = f"rl:global:{ip}"
+            identity = get_client_identity(request)
+            key = f"rl:global:{identity}"
             pipe = client.pipeline()
             pipe.incr(key)
             pipe.expire(key, self.window, nx=True)
