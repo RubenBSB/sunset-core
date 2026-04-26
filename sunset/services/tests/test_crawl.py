@@ -508,6 +508,59 @@ class TestCrawlExcludeAndSkip:
         )
 
 
+class TestCrawlOrdering:
+    """BFS ordering: seed-page links should be crawled before sitemap URLs."""
+
+    @pytest.mark.asyncio
+    async def test_seed_links_crawled_before_sitemap(self):
+        # Sitemap floods the queue with many URLs that do NOT include /agenda.
+        # /agenda is only discoverable via a link on the homepage.
+        # With max_pages smaller than the sitemap size, /agenda must still
+        # be reached because seed-linked pages are queued before the sitemap.
+        sitemap_urls = {f"https://www.example.com/sitemap-page-{i}" for i in range(50)}
+        seed_url = "https://www.example.com/"
+        agenda_url = "https://www.example.com/agenda"
+
+        async def fake_visit(
+            self, page, url, depth, output_format, markdownify, BeautifulSoup
+        ):
+            links = [agenda_url] if url == seed_url else []
+            return CrawlPage(url=url, title=url, content="x", depth=depth, links=links)
+
+        svc = PlaywrightCrawlService(request_delay=0)
+        svc._browser = MagicMock()
+        svc._browser.new_context = AsyncMock(
+            return_value=MagicMock(
+                new_page=AsyncMock(return_value=MagicMock(close=AsyncMock())),
+                close=AsyncMock(),
+            )
+        )
+
+        with (
+            patch.object(PlaywrightCrawlService, "_ensure_browser", AsyncMock()),
+            patch.object(PlaywrightCrawlService, "_visit_page", fake_visit),
+            patch(
+                "sunset.services.crawl.playwright._discover_sitemap_urls",
+                AsyncMock(return_value=sitemap_urls),
+            ),
+        ):
+            result = await svc.crawl(seed_url, max_pages=10)
+
+        visited_urls = [p.url for p in result.pages]
+        assert visited_urls[0] == seed_url, "seed must be processed first"
+        assert agenda_url in visited_urls, (
+            "seed-linked page must be crawled within max_pages even when the "
+            "sitemap floods the queue"
+        )
+        # /agenda should land before any sitemap URL
+        agenda_idx = visited_urls.index(agenda_url)
+        first_sitemap_idx = next(
+            (i for i, u in enumerate(visited_urls) if "sitemap-page-" in u),
+            len(visited_urls),
+        )
+        assert agenda_idx < first_sitemap_idx
+
+
 class TestExtraNoiseCleanup:
     @pytest.mark.asyncio
     async def test_extra_noise_applied_to_output(self):

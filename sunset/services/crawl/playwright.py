@@ -284,14 +284,14 @@ class PlaywrightCrawlService(CrawlService):
         queue.append((normalized, 0))
         visited.add(normalized)
 
-        # Seed queue from sitemap discovery
+        # Discover sitemap URLs but defer enqueueing until after the seed
+        # page is processed. Sites can have thousands of sitemap entries,
+        # and important pages linked from the seed (e.g. /agenda) may be
+        # absent from the sitemap — enqueueing sitemap URLs first would
+        # bury those links beyond max_pages.
+        pending_sitemap_urls: list[str] = []
         if self.discover_sitemap:
-            sitemap_urls = await _discover_sitemap_urls(url, domains)
-            for surl in sitemap_urls:
-                if surl not in visited and not _should_skip(surl):
-                    if not self._is_excluded(surl, exclude_patterns):
-                        visited.add(surl)
-                        queue.append((surl, 0))
+            pending_sitemap_urls = list(await _discover_sitemap_urls(url, domains))
 
         context = await self._browser.new_context()
         page = await context.new_page()
@@ -330,6 +330,19 @@ class PlaywrightCrawlService(CrawlService):
                         elif depth < max_depth and normalized_link not in visited:
                             visited.add(normalized_link)
                             queue.append((normalized_link, depth + 1))
+
+                # Drain sitemap URLs into the queue once the seed page
+                # has contributed its links, so seed-linked pages are
+                # crawled before the sitemap flood.
+                if pending_sitemap_urls and current_url == normalized:
+                    for surl in pending_sitemap_urls:
+                        if surl in visited or _should_skip(surl):
+                            continue
+                        if self._is_excluded(surl, exclude_patterns):
+                            continue
+                        visited.add(surl)
+                        queue.append((surl, 0))
+                    pending_sitemap_urls = []
 
                 if self.request_delay > 0:
                     await asyncio.sleep(self.request_delay)
