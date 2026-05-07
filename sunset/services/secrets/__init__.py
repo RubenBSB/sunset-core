@@ -4,6 +4,15 @@ from typing import Optional
 
 from google.cloud import secretmanager
 
+_secrets_service: "Optional[SecretsService]" = None
+
+
+def get_secrets() -> "SecretsService":
+    global _secrets_service
+    if _secrets_service is None:
+        _secrets_service = SecretsService()
+    return _secrets_service
+
 
 class SecretsService:
     """
@@ -55,13 +64,3 @@ class SecretsService:
             if default is not None:
                 return default
             raise ValueError(f"Failed to load secret '{secret_name}': {e}")
-
-
-_secrets_service: Optional[SecretsService] = None
-
-
-def get_secrets() -> SecretsService:
-    global _secrets_service
-    if _secrets_service is None:
-        _secrets_service = SecretsService()
-    return _secrets_service

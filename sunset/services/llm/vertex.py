@@ -8,8 +8,14 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from . import LLMResponse, SourceChunk, ToolCall, ToolExecutor, _split_tools
-from .base import LLMService
+from .base import (
+    LLMResponse,
+    LLMService,
+    SourceChunk,
+    ToolCall,
+    ToolExecutor,
+    _split_tools,
+)
 from .store import VertexFileStore
 
 logger = logging.getLogger(__name__)
@@ -232,6 +238,24 @@ class VertexAIGeminiService(LLMService):
 
         return system_instruction, gemini_messages
 
+    @staticmethod
+    def _with_priority(
+        config: Optional[types.GenerateContentConfig], priority: bool
+    ) -> Optional[types.GenerateContentConfig]:
+        """If priority=True, attach the Priority Paygo header to the config so
+        Vertex AI bills the request at the priority tier (1.8x standard) and
+        serves it from the priority quota pool. The flag propagates per-request,
+        not per-client, so a single service instance can be used for both
+        standard and priority calls."""
+        if not priority:
+            return config
+        if config is None:
+            config = types.GenerateContentConfig()
+        config.http_options = types.HttpOptions(
+            headers={"X-Vertex-AI-LLM-Request-Type": "priority"}
+        )
+        return config
+
     async def generate_response(
         self,
         input: str | List[Dict[str, Any]],
@@ -241,6 +265,7 @@ class VertexAIGeminiService(LLMService):
         text_format: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         metric_tag: str = "",
+        priority: bool = False,
     ) -> LLMResponse:
         has_file_search, regular_tools = _split_tools(function_tools)
 
@@ -250,17 +275,32 @@ class VertexAIGeminiService(LLMService):
                 # Discovery Engine can't mix with function tools
                 if self.retrieval:
                     return await self._retrieval_generate(
-                        input, model, regular_tools, tool_executor, metric_tag
+                        input,
+                        model,
+                        regular_tools,
+                        tool_executor,
+                        metric_tag,
+                        priority=priority,
                     )
                 return await self._grounded_then_tools(
-                    input, model, regular_tools, tool_executor, metric_tag
+                    input,
+                    model,
+                    regular_tools,
+                    tool_executor,
+                    metric_tag,
+                    priority=priority,
                 )
             return await self._grounded_generate(input, model, metric_tag)
 
         # Priority 2: pgvector retrieval
         if has_file_search and self.retrieval:
             return await self._retrieval_generate(
-                input, model, regular_tools, tool_executor, metric_tag
+                input,
+                model,
+                regular_tools,
+                tool_executor,
+                metric_tag,
+                priority=priority,
             )
 
         if has_file_search and not self.search_engine_id and not self.retrieval:
@@ -298,6 +338,7 @@ class VertexAIGeminiService(LLMService):
             config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=256)
 
         config = types.GenerateContentConfig(**config_params) if config_params else None
+        config = self._with_priority(config, priority)
 
         # Tool-calling loop
         if regular_tools and tool_executor:
@@ -555,6 +596,7 @@ class VertexAIGeminiService(LLMService):
         extra_tools: Optional[List[Dict[str, Any]]] = None,
         extra_executor: Optional[ToolExecutor] = None,
         metric_tag: str = "",
+        priority: bool = False,
     ) -> LLMResponse:
         search_tool = {
             "type": "function",
@@ -632,6 +674,7 @@ class VertexAIGeminiService(LLMService):
             if model.startswith("gemini-3")
             else None,
         )
+        config = self._with_priority(config, priority)
 
         response, tool_calls_made = await self._vertex_tool_loop(
             model, gemini_messages, config, composite_executor, metric_tag
@@ -660,6 +703,7 @@ class VertexAIGeminiService(LLMService):
         regular_tools: List[Dict[str, Any]],
         tool_executor: ToolExecutor,
         metric_tag: str = "",
+        priority: bool = False,
     ) -> LLMResponse:
         """Two-pass: grounded generation for RAG, then tool-calling with RAG context."""
         grounded = await self._grounded_generate(input, model, metric_tag)
@@ -698,6 +742,7 @@ class VertexAIGeminiService(LLMService):
             if model.startswith("gemini-3")
             else None,
         )
+        config = self._with_priority(config, priority)
 
         response, tool_calls_made = await self._vertex_tool_loop(
             model, gemini_messages, config, tool_executor, metric_tag

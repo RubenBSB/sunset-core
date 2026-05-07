@@ -15,6 +15,14 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _build_proxy_url(username: str, password: str) -> str:
+    sess_id = "".join(random.choices(string.digits, k=10))
+    base = username if username.startswith("customer-") else f"customer-{username}"
+    proxy_user = f"{base}-cc-us-sessid-{sess_id}-sesstime-10"
+    encoded_pw = quote(password, safe="")
+    return f"http://{proxy_user}:{encoded_pw}@pr.oxylabs.io:7777"
+
+
 @dataclass
 class MediaItem:
     """Single media item (image or video) within a post."""
@@ -51,14 +59,6 @@ class InstagramProfile:
     following: int
     post_count: int
     profile_pic_url: Optional[str]
-
-
-def _build_proxy_url(username: str, password: str) -> str:
-    sess_id = "".join(random.choices(string.digits, k=10))
-    base = username if username.startswith("customer-") else f"customer-{username}"
-    proxy_user = f"{base}-cc-us-sessid-{sess_id}-sesstime-10"
-    encoded_pw = quote(password, safe="")
-    return f"http://{proxy_user}:{encoded_pw}@pr.oxylabs.io:7777"
 
 
 class InstagramService:

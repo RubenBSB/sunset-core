@@ -7,6 +7,15 @@ import posthog
 
 logger = logging.getLogger(__name__)
 
+_analytics: "Optional[AnalyticsService]" = None
+
+
+def get_analytics() -> "AnalyticsService":
+    global _analytics
+    if _analytics is None:
+        _analytics = AnalyticsService()
+    return _analytics
+
 
 class AnalyticsService:
     _instance = None
@@ -100,7 +109,3 @@ class AnalyticsService:
             logger.info(f"Identified user: {user_id}")
         except Exception as e:
             logger.error(f"Failed to identify user {user_id}: {str(e)}")
-
-
-# Singleton instance
-analytics = AnalyticsService()

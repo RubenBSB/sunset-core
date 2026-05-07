@@ -13,6 +13,15 @@ from sunset.services.secrets import get_secrets
 
 logger = logging.getLogger(__name__)
 
+_storage_service: "Optional[StorageService]" = None
+
+
+def get_storage() -> "StorageService":
+    global _storage_service
+    if _storage_service is None:
+        _storage_service = StorageService()
+    return _storage_service
+
 
 class StorageService:
     """
@@ -224,13 +233,3 @@ class StorageService:
         bucket = self._get_bucket()
         blob = bucket.blob(blob_path)
         return blob.exists()
-
-
-_storage_service: Optional[StorageService] = None
-
-
-def get_storage() -> StorageService:
-    global _storage_service
-    if _storage_service is None:
-        _storage_service = StorageService()
-    return _storage_service

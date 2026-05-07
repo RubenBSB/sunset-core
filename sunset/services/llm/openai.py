@@ -5,8 +5,14 @@ from typing import Any, Dict, List, Optional, Type
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from . import LLMResponse, SourceChunk, ToolCall, ToolExecutor, _split_tools
-from .base import LLMService
+from .base import (
+    LLMResponse,
+    LLMService,
+    SourceChunk,
+    ToolCall,
+    ToolExecutor,
+    _split_tools,
+)
 from .store import OpenAIFileStore
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,35 @@ class OpenAIService(LLMService):
             return AsyncOpenAI(api_key=self.api_key)
         return self.client
 
+    @staticmethod
+    def _reasoning_for(model: str) -> Optional[Dict[str, Any]]:
+        """Reasoning config per model. Returns None for non-reasoning models."""
+        if model in ("gpt-5-mini", "gpt-5-nano", "gpt-5.1"):
+            return {"effort": "low"}
+        if model == "gpt-5.4-mini":
+            return {"effort": "medium"}
+        return None
+
+    @staticmethod
+    def _to_responses_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert a Chat-Completions-style function tool to the flatter
+        Responses-API shape OpenAI expects.
+
+        Chat Completions:  {"type": "function", "function": {"name", "description", "parameters", ...}}
+        Responses:         {"type": "function", "name", "description", "parameters", ...}
+
+        Pass through any other tool type (e.g. file_search) and any tool
+        already in the flat shape unchanged.
+        """
+        if tool.get("type") != "function" or "function" not in tool:
+            return tool
+        fn = tool["function"] or {}
+        out = {"type": "function"}
+        for key in ("name", "description", "parameters", "strict"):
+            if key in fn:
+                out[key] = fn[key]
+        return out
+
     async def generate_response(
         self,
         input: str | List[Dict[str, Any]],
@@ -59,12 +94,21 @@ class OpenAIService(LLMService):
         text_format: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         metric_tag: str = "",
+        priority: bool = False,
     ) -> LLMResponse:
         has_file_search, regular_tools = _split_tools(function_tools)
 
+        # If file_search is requested but no vector store is configured AND a
+        # pgvector retrieval service is available, route through the retrieval
+        # path so RAG works without uploading files to OpenAI.
+        if has_file_search and self._store is None and self.retrieval is not None:
+            return await self._retrieval_generate(
+                input, model, regular_tools, tool_executor, metric_tag, temperature
+            )
+
         tools = []
-        reasoning = None
         include = []
+        reasoning = self._reasoning_for(model)
 
         # File search setup
         file_store = await self._ensure_store() if has_file_search else None
@@ -75,15 +119,11 @@ class OpenAIService(LLMService):
                     "vector_store_ids": [file_store._store_id],
                 }
             )
-            reasoning = (
-                {"effort": "low"}
-                if model in ["gpt-5-mini", "gpt-5-nano", "gpt-5.1"]
-                else None
-            )
             include = ["output[*].file_search_call.search_results"]
 
-        # Add custom function tools
-        tools.extend(regular_tools)
+        # Add custom function tools — convert each from Chat-Completions shape
+        # to the flat Responses-API shape OpenAI requires.
+        tools.extend(self._to_responses_tool(t) for t in regular_tools)
 
         # Tool-calling loop when custom tools are present
         if regular_tools and tool_executor:
@@ -100,6 +140,7 @@ class OpenAIService(LLMService):
                     model=model,
                     input=conversation,
                     tools=tools if tools else None,
+                    reasoning=reasoning,
                     include=include if include else None,
                 )
 
@@ -229,6 +270,100 @@ class OpenAIService(LLMService):
         except Exception as e:
             logger.debug(f"Could not extract sources from response: {e}")
             return []
+
+    async def _retrieval_generate(
+        self,
+        input: str | List[Dict[str, Any]],
+        model: str,
+        extra_tools: Optional[List[Dict[str, Any]]] = None,
+        extra_executor: Optional[ToolExecutor] = None,
+        metric_tag: str = "",
+        temperature: Optional[float] = None,
+    ) -> LLMResponse:
+        """RAG via pgvector. Exposes a search_knowledge function tool to the
+        model and runs the standard tool loop. Mirrors VertexAIGeminiService.
+        """
+        search_tool = {
+            "type": "function",
+            "function": {
+                "name": "search_knowledge",
+                "description": "Search the knowledge base for relevant documents and information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "response_language": {
+                            "type": "string",
+                            "description": (
+                                "The dominant language of the conversation so far, as an ISO "
+                                "639-1 code (e.g. 'en', 'fr', 'es', 'de'). Base this on the full "
+                                "conversation, not just the last message — short or ambiguous "
+                                "turns (e.g. 'in toulouse', 'ok', proper nouns) do NOT change "
+                                "the language. Only change languages if the user clearly and "
+                                "deliberately switched. Your final reply MUST be written in this "
+                                "language, regardless of the language of the retrieved content."
+                            ),
+                        },
+                        "query": {"type": "string", "description": "Search query"},
+                    },
+                    "required": ["response_language", "query"],
+                },
+            },
+        }
+
+        retrieved_chunks: List[Dict[str, Any]] = []
+
+        async def composite_executor(name: str, args: dict):
+            if name == "search_knowledge":
+                response_language = (
+                    args.get("response_language") or "the user's language"
+                )
+                chunks = await self.retrieval.query(args["query"], top_k=5)
+                retrieved_chunks.extend(chunks)
+                return {
+                    "language_reminder": (
+                        f"The retrieved content may be in a different language than the user. "
+                        f"Your final reply MUST be written in '{response_language}'. "
+                        f"Translate any content inline as needed — never switch languages on "
+                        f"the user, and never mix languages in a single reply."
+                    ),
+                    "results": [
+                        {
+                            "content": c["content"],
+                            "source": c["source_file"],
+                            "score": c["score"],
+                        }
+                        for c in chunks
+                    ],
+                }
+            if extra_executor:
+                return await extra_executor(name, args)
+            return {"error": f"Unknown tool: {name}"}
+
+        all_tools = [search_tool] + (extra_tools or [])
+
+        response = await self.generate_response(
+            input=input,
+            model=model,
+            function_tools=all_tools,
+            tool_executor=composite_executor,
+            temperature=temperature,
+            metric_tag=metric_tag,
+        )
+
+        cited_chunks: List[SourceChunk] = [
+            SourceChunk(
+                file_id=chunk["id"],
+                filename=chunk["source_file"],
+                text=chunk["content"],
+                score=chunk["score"],
+            )
+            for chunk in retrieved_chunks
+        ]
+        return LLMResponse(
+            text=response["text"],
+            cited_chunks=cited_chunks[:5] if cited_chunks else None,
+            tool_calls=response.get("tool_calls"),
+        )
 
     async def generate_json(
         self,

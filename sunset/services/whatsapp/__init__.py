@@ -30,6 +30,58 @@ logger = logging.getLogger(__name__)
 MessageHandler = Callable[[Dict[str, Any]], Awaitable[Optional[str]]]
 
 
+def extract_webhook_message(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extract message data from WhatsApp webhook payload.
+
+    Returns dict with: id, name, sender, text, image_media_id, audio_media_id
+    """
+    for entry in body.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            contacts = value.get("contacts", [])
+            name = contacts[0].get("profile", {}).get("name") if contacts else None
+
+            for message in value.get("messages", []):
+                msg_type = message.get("type")
+                sender = message.get("from")
+                msg_id = message.get("id")
+                if not sender:
+                    continue
+
+                base = {
+                    "id": msg_id,
+                    "name": name,
+                    "sender": sender,
+                    "text": None,
+                    "image_media_id": None,
+                    "audio_media_id": None,
+                }
+
+                if msg_type == "text":
+                    text_body = message.get("text", {}).get("body")
+                    if text_body:
+                        return {**base, "text": text_body.strip()}
+
+                if msg_type == "image":
+                    image = message.get("image", {}) or {}
+                    media_id = image.get("id")
+                    if media_id:
+                        return {
+                            **base,
+                            "text": (image.get("caption") or "").strip() or None,
+                            "image_media_id": media_id,
+                        }
+
+                if msg_type == "audio":
+                    audio = message.get("audio", {}) or {}
+                    media_id = audio.get("id")
+                    if media_id:
+                        return {**base, "audio_media_id": media_id}
+
+    return None
+
+
 class WhatsappService:
     """Singleton service for WhatsApp bot operations."""
 
@@ -256,55 +308,3 @@ class WhatsappService:
         finally:
             if typing_task and not typing_task.done():
                 typing_task.cancel()
-
-
-def extract_webhook_message(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Extract message data from WhatsApp webhook payload.
-
-    Returns dict with: id, name, sender, text, image_media_id, audio_media_id
-    """
-    for entry in body.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            contacts = value.get("contacts", [])
-            name = contacts[0].get("profile", {}).get("name") if contacts else None
-
-            for message in value.get("messages", []):
-                msg_type = message.get("type")
-                sender = message.get("from")
-                msg_id = message.get("id")
-                if not sender:
-                    continue
-
-                base = {
-                    "id": msg_id,
-                    "name": name,
-                    "sender": sender,
-                    "text": None,
-                    "image_media_id": None,
-                    "audio_media_id": None,
-                }
-
-                if msg_type == "text":
-                    text_body = message.get("text", {}).get("body")
-                    if text_body:
-                        return {**base, "text": text_body.strip()}
-
-                if msg_type == "image":
-                    image = message.get("image", {}) or {}
-                    media_id = image.get("id")
-                    if media_id:
-                        return {
-                            **base,
-                            "text": (image.get("caption") or "").strip() or None,
-                            "image_media_id": media_id,
-                        }
-
-                if msg_type == "audio":
-                    audio = message.get("audio", {}) or {}
-                    media_id = audio.get("id")
-                    if media_id:
-                        return {**base, "audio_media_id": media_id}
-
-    return None

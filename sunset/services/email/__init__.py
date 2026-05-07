@@ -11,6 +11,11 @@ from sunset.services.secrets import get_secrets
 logger = logging.getLogger(__name__)
 
 
+def get_email_service() -> "EmailService":
+    """Get the email service singleton."""
+    return EmailService.get_instance()
+
+
 class EmailService:
     """
     IMAP-based email service that listens for new emails using IDLE.
@@ -375,8 +380,3 @@ class EmailService:
             )
             await self._client.store(email_id_str, "+FLAGS", "\\Seen")
             logger.info(f"Marked email as read: {message_id}")
-
-
-def get_email_service() -> EmailService:
-    """Get the email service singleton."""
-    return EmailService.get_instance()

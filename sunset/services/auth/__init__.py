@@ -52,6 +52,52 @@ _hasher = argon2.PasswordHasher(
     parallelism=1,
 )
 
+GOOGLE_OIDC = {
+    "server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+    "client_id_secret": "GOOGLE_OAUTH_CLIENT_ID",
+    "client_secret_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
+    "id_field": "google_id",
+    "id_claim": "sub",
+}
+
+MICROSOFT_OIDC = {
+    "server_metadata_url": "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+    "client_id_secret": "MICROSOFT_OAUTH_CLIENT_ID",
+    "client_secret_secret": "MICROSOFT_OAUTH_CLIENT_SECRET",
+    "id_field": "microsoft_id",
+    "id_claim": "oid",
+    "claims_options": {"iss": {"essential": False}},
+}
+
+APPLE_OIDC = {
+    "server_metadata_url": "https://appleid.apple.com/.well-known/openid-configuration",
+    "client_id_secret": "APPLE_OAUTH_CLIENT_ID",
+    "client_secret_secret": "APPLE_OAUTH_CLIENT_SECRET",
+    "id_field": "apple_id",
+    "id_claim": "sub",
+}
+
+_auth_service: "Optional[AuthService]" = None
+
+
+def get_auth_service(jwt_secret: Optional[str] = None, **kwargs) -> "AuthService":
+    """
+    Get or create the AuthService singleton.
+
+    Args:
+        jwt_secret: JWT secret (required on first call, optional after)
+        **kwargs: Additional arguments passed to AuthService constructor on first call
+
+    Returns:
+        AuthService instance
+    """
+    global _auth_service
+    if _auth_service is None:
+        if not jwt_secret:
+            raise ValueError("jwt_secret is required for first initialization")
+        _auth_service = AuthService(jwt_secret=jwt_secret, **kwargs)
+    return _auth_service
+
 
 class AuthService:
     """
@@ -370,36 +416,6 @@ class AuthService:
         return totp.now()
 
 
-# =========================================================================
-# OAuth / OIDC
-# =========================================================================
-
-GOOGLE_OIDC = {
-    "server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
-    "client_id_secret": "GOOGLE_OAUTH_CLIENT_ID",
-    "client_secret_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
-    "id_field": "google_id",
-    "id_claim": "sub",
-}
-
-MICROSOFT_OIDC = {
-    "server_metadata_url": "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
-    "client_id_secret": "MICROSOFT_OAUTH_CLIENT_ID",
-    "client_secret_secret": "MICROSOFT_OAUTH_CLIENT_SECRET",
-    "id_field": "microsoft_id",
-    "id_claim": "oid",
-    "claims_options": {"iss": {"essential": False}},
-}
-
-APPLE_OIDC = {
-    "server_metadata_url": "https://appleid.apple.com/.well-known/openid-configuration",
-    "client_id_secret": "APPLE_OAUTH_CLIENT_ID",
-    "client_secret_secret": "APPLE_OAUTH_CLIENT_SECRET",
-    "id_field": "apple_id",
-    "id_claim": "sub",
-}
-
-
 class OAuthRegistry:
     """Registers authlib OIDC clients for a set of providers.
 
@@ -481,26 +497,3 @@ class OAuthRegistry:
             return True
         except AttributeError:
             return False
-
-
-# Singleton instance
-_auth_service: Optional[AuthService] = None
-
-
-def get_auth_service(jwt_secret: Optional[str] = None, **kwargs) -> AuthService:
-    """
-    Get or create the AuthService singleton.
-
-    Args:
-        jwt_secret: JWT secret (required on first call, optional after)
-        **kwargs: Additional arguments passed to AuthService constructor on first call
-
-    Returns:
-        AuthService instance
-    """
-    global _auth_service
-    if _auth_service is None:
-        if not jwt_secret:
-            raise ValueError("jwt_secret is required for first initialization")
-        _auth_service = AuthService(jwt_secret=jwt_secret, **kwargs)
-    return _auth_service

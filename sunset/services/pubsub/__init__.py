@@ -14,6 +14,27 @@ logger = logging.getLogger(__name__)
 MessageHandler = Callable[[dict], Any]
 
 
+def _sentry_trace_attributes() -> Dict[str, str]:
+    """Capture the current Sentry trace context as Pub/Sub message attributes.
+
+    Pub/Sub attributes are string-only. Returns an empty dict if Sentry is not
+    initialized or no transaction is active.
+    """
+    try:
+        import sentry_sdk
+
+        attrs: Dict[str, str] = {}
+        traceparent = sentry_sdk.get_traceparent()
+        if traceparent:
+            attrs["sentry-trace"] = traceparent
+        baggage = sentry_sdk.get_baggage()
+        if baggage:
+            attrs["baggage"] = baggage
+        return attrs
+    except Exception:
+        return {}
+
+
 class PubSubService:
     _instance = None
 
@@ -153,8 +174,12 @@ class PubSubService:
         # Ensure topic exists (creates if needed in emulator mode)
         self._ensure_topic_exists(topic_path)
 
+        # Propagate Sentry trace context as Pub/Sub message attributes so the
+        # worker can continue the same trace and we get one waterfall E2E.
+        attrs = _sentry_trace_attributes()
+
         # Publish message asynchronously without blocking
-        future = self.publisher.publish(topic_path, encoded)
+        future = self.publisher.publish(topic_path, encoded, **attrs)
         future.add_done_callback(
             lambda f: self._publish_callback(f, message_id, topic_path)
         )

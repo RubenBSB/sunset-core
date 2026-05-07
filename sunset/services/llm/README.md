@@ -1,6 +1,6 @@
 # LLMService
 
-Multi-provider LLM service with unified interface for text generation, tool calling, structured output, and file search (RAG). Supports OpenAI, Gemini, and Vertex AI.
+Multi-provider LLM service with unified interface for text generation, tool calling, structured output, and file search (RAG). Supports OpenAI, Gemini, Vertex AI, and Mistral.
 
 ## Setup
 
@@ -30,6 +30,12 @@ secrets:
 ```yaml
 secrets:
   GEMINI_API_KEY: "..."
+```
+
+**Mistral**: Add to `sunset.env.yaml`:
+```yaml
+secrets:
+  MISTRAL_API_KEY: "..."
 ```
 
 ## Usage
@@ -177,15 +183,51 @@ from sunset.services.llm import LLMServiceRouter
 
 llm = LLMServiceRouter(
     openai_api_key=OPENAI_KEY,
+    mistral_api_key=MISTRAL_KEY,
     use_vertex_ai=True,
     vertex_project=PROJECT_ID,
-    vertex_location="global",
+    vertex_location="europe-west1",
+    vertex_extra_locations=["global"],   # extra location-pinned clients for fallback
 )
 
 # Automatically routes to the right provider based on model name
 response = await llm.generate_response(input=messages, model="gpt-4o")
 response = await llm.generate_response(input=messages, model="gemini-2.5-flash")
+response = await llm.generate_response(input=messages, model="mistral-medium-latest")
 ```
+
+### Cross-provider fallback with circuit breaker
+
+`generate_with_fallback()` runs an explicit chain of `(model, location, priority)` steps and advances on exception, timeout, or empty response. An optional `BreakerProtocol` skips steps whose breaker is open and records 429s / slow successes — the safety-net step (last in chain) is never skipped.
+
+```python
+from sunset.services.llm import FallbackStep, LLMFallbackChainExhausted
+
+chain = llm.default_fallback_chain("gemini-3-flash-preview")
+# Or build it yourself:
+# chain = [
+#     FallbackStep("gemini-3-flash-preview", "europe-west1"),
+#     FallbackStep("gemini-3-flash-preview", "global"),
+#     FallbackStep("gemini-3-flash-preview", "global", priority=True),
+#     FallbackStep("gpt-5.4-mini", "openai"),  # safety net
+# ]
+
+try:
+    response = await llm.generate_with_fallback(
+        input=messages,
+        chain=chain,
+        function_tools=[file_search],
+        tool_executor=execute_tool,
+        breaker=my_breaker,                    # optional, implements BreakerProtocol
+        on_attempt=lambda step, outcome, err, attempt: ...,
+        attempt_timeout_s=10.0,
+        slow_threshold_s=8.0,
+    )
+except LLMFallbackChainExhausted:
+    ...
+```
+
+`priority=True` on a Vertex Gemini step attaches the Priority Paygo header (1.8x billing, separate quota pool). No-op for OpenAI / Mistral.
 
 ## API Reference
 
@@ -210,8 +252,30 @@ response = await llm.generate_response(input=messages, model="gemini-2.5-flash")
 
 ### Key Methods (all providers)
 
-- `generate_response(input, model, function_tools?, tool_executor?, text_format?, temperature?, metric_tag?) -> LLMResponse` (async)
+- `generate_response(input, model, function_tools?, tool_executor?, text_format?, temperature?, metric_tag?, priority?) -> LLMResponse` (async)
 - `generate_json(messages, model, temperature?, text_format?) -> dict` (async)
+
+### Router-only methods
+
+- `generate_with_fallback(input, chain, ..., breaker?, on_attempt?, attempt_scope?, attempt_timeout_s?, max_empty_attempts?, slow_threshold_s?) -> LLMResponse` (async)
+- `default_fallback_chain(model) -> list[FallbackStep]` — preview models get a multi-step chain (preferred → stable → priority paygo), stable models get local + global, others get a single step. Cross-provider safety net is appended when those providers are configured.
+
+### `FallbackStep`
+
+```python
+FallbackStep(model: str, location: str, priority: bool = False)
+# location is "openai" / "mistral" or a GCP region for Vertex Gemini.
+# breaker_key is "{model}@{location}[+priority]"
+```
+
+### `BreakerProtocol`
+
+```python
+class BreakerProtocol(Protocol):
+    async def is_open(self, key: str) -> bool: ...
+    async def record_429(self, key: str) -> bool: ...
+    async def record_slow(self, key: str) -> bool: ...
+```
 
 ### `LLMResponse` TypedDict
 

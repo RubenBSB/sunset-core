@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 
 
+def _build_proxy_url(username: str, password: str) -> str:
+    sess_id = "".join(random.choices(string.digits, k=10))
+    base = username if username.startswith("customer-") else f"customer-{username}"
+    proxy_user = f"{base}-cc-us-sessid-{sess_id}-sesstime-10"
+    encoded_pw = quote(password, safe="")
+    return f"http://{proxy_user}:{encoded_pw}@pr.oxylabs.io:7777"
+
+
 @dataclass
 class YouTubeVideo:
     """A YouTube video with metadata and statistics."""
@@ -72,14 +80,6 @@ class Transcript:
     @property
     def text(self) -> str:
         return " ".join(s.text for s in self.segments)
-
-
-def _build_proxy_url(username: str, password: str) -> str:
-    sess_id = "".join(random.choices(string.digits, k=10))
-    base = username if username.startswith("customer-") else f"customer-{username}"
-    proxy_user = f"{base}-cc-us-sessid-{sess_id}-sesstime-10"
-    encoded_pw = quote(password, safe="")
-    return f"http://{proxy_user}:{encoded_pw}@pr.oxylabs.io:7777"
 
 
 class YouTubeService:

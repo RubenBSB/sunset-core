@@ -49,6 +49,17 @@ Example output:
 ["First chunk text...", "Second chunk text...", "Third chunk text..."]
 """
 
+_FILTER_OPS = {
+    "$eq": "=",
+    "$ne": "!=",
+    "$gt": ">",
+    "$gte": ">=",
+    "$lt": "<",
+    "$lte": "<=",
+}
+
+_COLUMN_KEYS = {"source_file", "content_type"}
+
 
 def _make_vertex_ai_tokenizer(max_tokens: int = 2000):
     """Create a VertexAITokenizer instance (imports docling lazily)."""
@@ -77,18 +88,6 @@ def _make_vertex_ai_tokenizer(max_tokens: int = 2000):
             return self.count_tokens
 
     return VertexAITokenizer(max_tokens=max_tokens)
-
-
-_FILTER_OPS = {
-    "$eq": "=",
-    "$ne": "!=",
-    "$gt": ">",
-    "$gte": ">=",
-    "$lt": "<",
-    "$lte": "<=",
-}
-
-_COLUMN_KEYS = {"source_file", "content_type"}
 
 
 def _build_where(

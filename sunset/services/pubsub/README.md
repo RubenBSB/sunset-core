@@ -48,6 +48,8 @@ pubsub.publish_message(
 )
 ```
 
+If Sentry is initialized in the publisher, the active trace context (`sentry-trace`, `baggage`) is attached to each Pub/Sub message as attributes so the worker can continue the same trace and the publisher → worker call appears as one waterfall E2E. No-op when Sentry isn't initialized.
+
 ### Subscribing to messages (in workers)
 
 ```python

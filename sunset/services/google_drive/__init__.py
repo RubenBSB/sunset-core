@@ -28,6 +28,18 @@ GOOGLE_EXPORT_MIME_MAP = {
 }
 
 
+def _check_response(resp: httpx.Response) -> None:
+    if resp.status_code == 401:
+        raise TokenExpiredError(f"Token expired: {resp.text}")
+    if resp.status_code == 403:
+        raise InsufficientPermissionsError(f"Insufficient permissions: {resp.text}")
+    if resp.status_code == 404:
+        raise NotFoundError(f"Not found: {resp.text}")
+    if resp.status_code == 429:
+        raise RateLimitError(f"Rate limit exceeded: {resp.text}")
+    resp.raise_for_status()
+
+
 class GoogleDriveError(Exception):
     """Base exception for Google Drive API errors."""
 
@@ -46,18 +58,6 @@ class NotFoundError(GoogleDriveError):
 
 class RateLimitError(GoogleDriveError):
     """Rate limit exceeded (429)."""
-
-
-def _check_response(resp: httpx.Response) -> None:
-    if resp.status_code == 401:
-        raise TokenExpiredError(f"Token expired: {resp.text}")
-    if resp.status_code == 403:
-        raise InsufficientPermissionsError(f"Insufficient permissions: {resp.text}")
-    if resp.status_code == 404:
-        raise NotFoundError(f"Not found: {resp.text}")
-    if resp.status_code == 429:
-        raise RateLimitError(f"Rate limit exceeded: {resp.text}")
-    resp.raise_for_status()
 
 
 class GoogleDriveService:

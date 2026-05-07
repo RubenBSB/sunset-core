@@ -12,8 +12,14 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from . import LLMResponse, SourceChunk, ToolCall, ToolExecutor, _split_tools
-from .base import LLMService
+from .base import (
+    LLMResponse,
+    LLMService,
+    SourceChunk,
+    ToolCall,
+    ToolExecutor,
+    _split_tools,
+)
 from .store import GeminiFileStore
 
 logger = logging.getLogger(__name__)
