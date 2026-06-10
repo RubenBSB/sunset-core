@@ -13,10 +13,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncpg
-from google import genai
-from google.genai import types
 from pgvector.asyncpg import register_vector
 from pydantic import ConfigDict
+
+# NOTE: ``google.genai`` (the ``retrieval``/``llm`` extra) is imported lazily inside
+# the methods that need it, so importing this package — e.g. for the lightweight
+# ``MultimodalEmbeddingService`` sibling — does not require that extra.
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,8 @@ class RetrievalService:
         self.llm_service = llm_service
         self._pool: Optional[asyncpg.Pool] = pool
         self._external_pool = pool is not None
+        from google import genai
+
         self._genai = genai.Client(vertexai=True, project=project, location=location)
 
     # ------------------------------------------------------------------
@@ -507,6 +511,8 @@ class RetrievalService:
 
     async def _describe_image(self, image_bytes: bytes) -> Optional[str]:
         """Send an image to Gemini and get a text description."""
+        from google.genai import types
+
         try:
             response = await self._genai.aio.models.generate_content(
                 model=IMAGE_DESCRIBE_MODEL,

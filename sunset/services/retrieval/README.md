@@ -242,3 +242,29 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 - `list_sources(where=None) -> list[dict]` — List distinct ingested source files with chunk counts. `where` accepts a dict (parameterised), raw SQL string, or `None` for all. Returns `{source_file, chunks_count, created_at}` (async)
 - `delete(where) -> int` — Delete chunks matching a metadata filter (dict or raw SQL). Filter is required. Returns number of rows deleted (async)
 - `query(query_text, top_k=5, where=None) -> list[dict]` — Cosine similarity search with optional metadata filtering. `where` accepts a dict (parameterised) or raw SQL string. Returns `{id, content, source_file, metadata, score, created_at}` (async)
+
+---
+
+## MultimodalEmbeddingService (cross-modal: text / image / video)
+
+`RetrievalService` is text-only. For semantic search over **images and video**
+(e.g. a text query matching a photo), use its sibling `MultimodalEmbeddingService`,
+which wraps Vertex AI `multimodalembedding@001` — text, image and video all map
+into the **same 1408-d space**, so a text-query vector compares directly (cosine)
+against image/video vectors.
+
+It is **embedding only**: vector storage and search stay in the consuming project
+(your domain table + pgvector), the same way RetrievalService leaves your
+`Document` model to you.
+
+```python
+from sunset.services import MultimodalEmbeddingService
+
+svc = MultimodalEmbeddingService(project="my-proj", region="europe-west1")
+qvec   = svc.embed_text("robe rouge marrakech")          # list[float] (1408-d)
+imgvec = svc.embed_image(jpeg_bytes, mime_type="image/jpeg")
+segs   = svc.embed_video("/tmp/clip.mp4", interval_sec=15)  # [(start_sec, vec), ...]
+```
+
+Methods are synchronous (REST `:predict`); call them via `asyncio.to_thread` on an
+async request path. Constructor defaults to `GCP_PROJECT` / `GCP_REGION` env vars.

@@ -12,6 +12,7 @@ __all__ = [
     "LLMService",
     "MonitoringService",
     "RetrievalService",
+    "MultimodalEmbeddingService",
     "ChatService",
     "CrawlService",
     "FirecrawlService",
@@ -73,6 +74,10 @@ def __getattr__(name: str):
         from sunset.services.retrieval import RetrievalService
 
         return RetrievalService
+    if name == "MultimodalEmbeddingService":
+        from sunset.services.retrieval.multimodal import MultimodalEmbeddingService
+
+        return MultimodalEmbeddingService
     if name == "ChatService":
         from sunset.services.chat import ChatService
 
