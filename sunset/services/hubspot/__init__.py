@@ -502,6 +502,31 @@ class HubspotService:
                 headers=self._auth_headers(access_token),
             )
 
+    async def find_contact_by_email(
+        self,
+        access_token: str,
+        email: str,
+        properties: Optional[list[str]] = None,
+    ) -> Optional[Contact]:
+        """Look up a contact by email. Returns None if not found."""
+        params: dict[str, Any] = {"idProperty": "email"}
+        if properties:
+            params["properties"] = ",".join(properties)
+        async with self._http() as client:
+            try:
+                resp = await self._request(
+                    client,
+                    "GET",
+                    f"{HUBSPOT_API}/crm/v3/objects/contacts/{email}",
+                    headers=self._auth_headers(access_token),
+                    params=params,
+                )
+                return self._parse_contact(resp.json())
+            except HubspotError as e:
+                if e.status_code == 404:
+                    return None
+                raise
+
     async def create_or_update_contact_by_email(
         self, access_token: str, email: str, properties: dict
     ) -> Contact:

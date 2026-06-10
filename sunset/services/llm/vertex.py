@@ -14,6 +14,7 @@ from .base import (
     SourceChunk,
     ToolCall,
     ToolExecutor,
+    Usage,
     _split_tools,
 )
 from .store import VertexFileStore
@@ -94,6 +95,19 @@ class VertexAIGeminiService(LLMService):
 
             self._search_client = discoveryengine.SearchServiceClient()
         return self._search_client
+
+    @staticmethod
+    def _extract_usage(response) -> Usage:
+        usage = getattr(response, "usage_metadata", None)
+        if not usage:
+            return {}
+        return {
+            "input_tokens": getattr(usage, "prompt_token_count", 0) or 0,
+            "output_tokens": getattr(usage, "candidates_token_count", 0) or 0,
+            "total_tokens": getattr(usage, "total_token_count", 0) or 0,
+            "thinking_tokens": getattr(usage, "thoughts_token_count", 0) or 0,
+            "cached_tokens": getattr(usage, "cached_content_token_count", 0) or 0,
+        }
 
     def _track_tokens(self, response, model: str, method: str, metric_tag: str = ""):
         """Extract usage_metadata from response and push to Cloud Monitoring."""
@@ -349,6 +363,7 @@ class VertexAIGeminiService(LLMService):
                 text=self._clean_response_text(response.text or ""),
                 cited_chunks=None,
                 tool_calls=tool_calls_made if tool_calls_made else None,
+                usage=self._extract_usage(response),
             )
 
         # Simple generation
@@ -361,6 +376,7 @@ class VertexAIGeminiService(LLMService):
             text=self._clean_response_text(response.text or ""),
             cited_chunks=None,
             tool_calls=None,
+            usage=self._extract_usage(response),
         )
 
     async def _grounded_generate(
@@ -517,6 +533,7 @@ class VertexAIGeminiService(LLMService):
             text=self._clean_response_text(response_text),
             cited_chunks=cited_chunks if cited_chunks else None,
             tool_calls=None,
+            usage=self._extract_usage(response),
         )
 
     async def generate_json(
@@ -694,6 +711,7 @@ class VertexAIGeminiService(LLMService):
             text=self._clean_response_text(response.text or ""),
             cited_chunks=cited_chunks[:5] if cited_chunks else None,
             tool_calls=tool_calls_made if tool_calls_made else None,
+            usage=self._extract_usage(response),
         )
 
     async def _grounded_then_tools(
@@ -752,6 +770,7 @@ class VertexAIGeminiService(LLMService):
             text=self._clean_response_text(response.text or ""),
             cited_chunks=grounded["cited_chunks"],
             tool_calls=tool_calls_made if tool_calls_made else None,
+            usage=self._extract_usage(response),
         )
 
     async def _vertex_tool_loop(

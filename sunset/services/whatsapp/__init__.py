@@ -34,7 +34,8 @@ def extract_webhook_message(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Extract message data from WhatsApp webhook payload.
 
-    Returns dict with: id, name, sender, text, image_media_id, audio_media_id
+    Returns dict with: id, name, sender, type, text, image_media_id, audio_media_id.
+    type is "text" | "image" | "audio".
     """
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
@@ -53,6 +54,7 @@ def extract_webhook_message(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "id": msg_id,
                     "name": name,
                     "sender": sender,
+                    "type": msg_type,
                     "text": None,
                     "image_media_id": None,
                     "audio_media_id": None,

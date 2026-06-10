@@ -237,6 +237,8 @@ chat = ChatService(llm=llm, tools=[file_search], ...)
 - `connect()` / `close()` — Manage the asyncpg connection pool. If an external `pool` was provided, `connect()` only registers the pgvector type and `close()` is a no-op (async)
 - `embed(text) -> list[float]` — Embed a single text (async)
 - `embed_batch(texts) -> list[list[float]]` — Batch embed (async)
+
+Embedding calls retry transient Vertex errors (429 `RESOURCE_EXHAUSTED`, 503 `UNAVAILABLE`) with exponential backoff + jitter, up to 4 retries, then re-raise.
 - `ingest(text, source_file, metadata?, max_tokens?) -> int` — Chunk and embed raw text (async)
 - `ingest_document(file_path, metadata?, describe_images?, max_tokens?, do_ocr=True, do_table_structure=True, num_threads=4, engine="docling", llm_model="gemini-2.5-flash") -> int` — Parse, chunk, embed a document file. Plain text files (`.txt`, `.text`) are handled directly. Engines: `"docling"` (default) — local Docling parsing; `"reducto"` — Reducto cloud API (requires `REDUCTO_API_KEY` in secrets and `reductoai` package, supports `describe_images` and `max_tokens`); `"llm"` — sends the file to `llm_service` for extraction and chunking. Docling options: disable `do_ocr` for text-layer PDFs (biggest speedup), `do_table_structure` if tables aren't needed (async)
 - `list_sources(where=None) -> list[dict]` — List distinct ingested source files with chunk counts. `where` accepts a dict (parameterised), raw SQL string, or `None` for all. Returns `{source_file, chunks_count, created_at}` (async)

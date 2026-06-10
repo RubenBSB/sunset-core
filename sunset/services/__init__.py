@@ -3,7 +3,7 @@
 __all__ = [
     "SecretsService",
     "AuthService",
-    "WhatsAppService",
+    "WhatsappService",
     "extract_webhook_message",
     "EmailSendService",
     "StorageService",
@@ -26,6 +26,8 @@ __all__ = [
     "SEOService",
     "HubspotService",
     "SlackService",
+    "init_observability",
+    "instrument_fastapi",
 ]
 
 
@@ -39,10 +41,11 @@ def __getattr__(name: str):
         from sunset.services.auth import AuthService
 
         return AuthService
-    if name == "WhatsAppService":
-        from sunset.services.whatsapp import WhatsAppService
+    # "WhatsAppService" kept as an alias for the historical (broken) spelling.
+    if name in ("WhatsappService", "WhatsAppService"):
+        from sunset.services.whatsapp import WhatsappService
 
-        return WhatsAppService
+        return WhatsappService
     if name == "extract_webhook_message":
         from sunset.services.whatsapp import extract_webhook_message
 
@@ -131,4 +134,12 @@ def __getattr__(name: str):
         from sunset.services.slack import SlackService
 
         return SlackService
+    if name == "init_observability":
+        from sunset.services.observability import init_observability
+
+        return init_observability
+    if name == "instrument_fastapi":
+        from sunset.services.observability import instrument_fastapi
+
+        return instrument_fastapi
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

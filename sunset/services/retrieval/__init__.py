@@ -5,9 +5,11 @@ with Docling-powered parsing and chunking, and cosine-similarity search over
 a Cloud SQL PostgreSQL database with the pgvector extension.
 """
 
+import asyncio
 import io
 import json
 import logging
+import random
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -24,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIMENSIONS = 768
+
+# Transient Vertex statuses worth retrying: 429 RESOURCE_EXHAUSTED, 503 UNAVAILABLE.
+EMBED_RETRY_CODES = {429, 503}
+EMBED_MAX_RETRIES = 4
+EMBED_BACKOFF_BASE = 0.5
 
 IMAGE_DESCRIBE_PROMPT = (
     "Describe this image from a document in detail, including any text, "
@@ -228,13 +235,38 @@ class RetrievalService:
     # Embedding
     # ------------------------------------------------------------------
 
+    async def _embed_content(self, contents: Union[str, List[str]]):
+        """Call Vertex embed_content with exponential backoff + jitter on
+        transient 429/503 responses. Re-raises after EMBED_MAX_RETRIES so a
+        sustained outage still surfaces.
+        """
+        from google.genai import errors as genai_errors
+
+        delay = EMBED_BACKOFF_BASE
+        for attempt in range(EMBED_MAX_RETRIES + 1):
+            try:
+                return await self._genai.aio.models.embed_content(
+                    model=EMBEDDING_MODEL,
+                    contents=contents,
+                    config={"output_dimensionality": EMBEDDING_DIMENSIONS},
+                )
+            except genai_errors.APIError as e:
+                if e.code not in EMBED_RETRY_CODES or attempt == EMBED_MAX_RETRIES:
+                    raise
+                sleep_for = delay + random.uniform(0, delay)
+                logger.warning(
+                    "gemini-embedding-001 transient %s; retry %d/%d in %.2fs",
+                    e.code,
+                    attempt + 1,
+                    EMBED_MAX_RETRIES,
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                delay *= 2
+
     async def embed(self, text: str) -> List[float]:
         """Embed a single text string using Vertex AI gemini-embedding-001."""
-        response = await self._genai.aio.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=text,
-            config={"output_dimensionality": EMBEDDING_DIMENSIONS},
-        )
+        response = await self._embed_content(text)
         return list(response.embeddings[0].values)
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
@@ -243,11 +275,7 @@ class RetrievalService:
         all_embeddings: List[List[float]] = []
         for i in range(0, len(texts), _MAX_BATCH):
             batch = texts[i : i + _MAX_BATCH]
-            response = await self._genai.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=batch,
-                config={"output_dimensionality": EMBEDDING_DIMENSIONS},
-            )
+            response = await self._embed_content(batch)
             all_embeddings.extend(list(e.values) for e in response.embeddings)
         return all_embeddings
 

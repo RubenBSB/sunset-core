@@ -57,4 +57,4 @@ Singleton. Reads `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_TOKEN` from secrets.
 
 ### `extract_webhook_message(body) -> dict | None`
 
-Extract message data from webhook payload. Returns `{id, name, sender, text, image_media_id}`.
+Extract message data from webhook payload. Returns `{id, name, sender, type, text, image_media_id, audio_media_id}` where `type` is `"text" | "image" | "audio"` — dispatch on it instead of re-inspecting the payload.

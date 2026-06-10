@@ -10,6 +10,7 @@ from .base import (
     SourceChunk,
     ToolCall,
     ToolExecutor,
+    Usage,
     _FileSearchSentinel,
     _split_tools,
     file_search,
@@ -17,6 +18,7 @@ from .base import (
 from .gemini import GeminiService
 from .mistral import MistralService
 from .openai import OpenAIService
+from .openrouter import OpenRouterService
 from .router import LLMServiceRouter
 from .store import FileInfo, FileStore, StoreInfo
 from .vertex import VertexAIGeminiService
@@ -24,6 +26,7 @@ from .vertex import VertexAIGeminiService
 __all__ = [
     "SourceChunk",
     "ToolCall",
+    "Usage",
     "LLMResponse",
     "ToolExecutor",
     "FallbackStep",
@@ -35,6 +38,7 @@ __all__ = [
     "_split_tools",
     "LLMService",
     "OpenAIService",
+    "OpenRouterService",
     "GeminiService",
     "VertexAIGeminiService",
     "MistralService",

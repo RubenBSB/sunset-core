@@ -11,6 +11,7 @@ from .base import (
     SourceChunk,
     ToolCall,
     ToolExecutor,
+    Usage,
     _split_tools,
 )
 
@@ -44,6 +45,22 @@ class MistralService(LLMService):
         if not hasattr(self, "client"):
             return Mistral(api_key=self.api_key)
         return self.client
+
+    @staticmethod
+    def _extract_usage(response) -> Usage:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return {}
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        total_tokens = getattr(usage, "total_tokens", 0) or (
+            input_tokens + output_tokens
+        )
+        return {
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
+            "total_tokens": int(total_tokens),
+        }
 
     @property
     def store(self):
@@ -218,12 +235,18 @@ class MistralService(LLMService):
                 text=text or "",
                 cited_chunks=None,
                 tool_calls=tool_calls_made if tool_calls_made else None,
+                usage=self._extract_usage(response),
             )
 
         # Simple generation
         response = await self.client.chat.complete_async(**kwargs)
         text = response.choices[0].message.content or ""
-        return LLMResponse(text=text, cited_chunks=None, tool_calls=None)
+        return LLMResponse(
+            text=text,
+            cited_chunks=None,
+            tool_calls=None,
+            usage=self._extract_usage(response),
+        )
 
     async def _retrieval_generate(
         self,
@@ -315,6 +338,7 @@ class MistralService(LLMService):
             text=response["text"],
             cited_chunks=cited_chunks[:5] if cited_chunks else None,
             tool_calls=response.get("tool_calls"),
+            usage=response.get("usage"),
         )
 
     async def generate_json(

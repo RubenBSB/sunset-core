@@ -30,7 +30,16 @@ class RedisService:
     async def connect(self) -> aioredis.Redis:
         """Connect to Redis. Returns the underlying client."""
         if self._client is None:
-            self._client = aioredis.from_url(self.url, decode_responses=True)
+            # keepalive + health checks: Memorystore silently drops idle
+            # connections, which surfaces as TimeoutError on the next read.
+            self._client = aioredis.from_url(
+                self.url,
+                decode_responses=True,
+                socket_keepalive=True,
+                socket_connect_timeout=10,
+                health_check_interval=30,
+                retry_on_timeout=True,
+            )
             logger.info(f"Connected to Redis at {self.url}")
         return self._client
 

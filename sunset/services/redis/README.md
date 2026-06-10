@@ -95,7 +95,7 @@ Singleton. Reads `REDIS_URL` from env (default: `redis://localhost:6379`).
 
 ### Methods
 
-- `connect() -> Redis` — Connect and return the underlying `redis.asyncio` client
+- `connect() -> Redis` — Connect and return the underlying `redis.asyncio` client. Connections use TCP keepalive, a 10s connect timeout, a 30s health-check interval, and retry-on-timeout — Memorystore silently drops idle connections, which would otherwise surface as `TimeoutError` on the next read.
 - `close()` — Close the connection
 - `publish(channel, data) -> int` — JSON-serialize and publish; returns subscriber count
 - `subscribe(channel) -> AsyncIterator[dict]` — Yields parsed JSON messages from channel

@@ -1,6 +1,6 @@
 # LLMService
 
-Multi-provider LLM service with unified interface for text generation, tool calling, structured output, and file search (RAG). Supports OpenAI, Gemini, Vertex AI, and Mistral.
+Multi-provider LLM service with unified interface for text generation, tool calling, structured output, and file search (RAG). Supports OpenAI, Gemini, Vertex AI, Mistral, and OpenRouter.
 
 ## Setup
 
@@ -229,6 +229,29 @@ except LLMFallbackChainExhausted:
 
 `priority=True` on a Vertex Gemini step attaches the Priority Paygo header (1.8x billing, separate quota pool). No-op for OpenAI / Mistral.
 
+### Per-provider concurrency gating
+
+The router bounds in-flight calls per provider bucket with local semaphores (`DEFAULT_PROVIDER_CONCURRENCY`, override via the `provider_concurrency` constructor param). On non-final fallback steps, a permit must be acquired within `acquire_timeout_s` (default 2s) or the step is skipped as `"throttled"` and the chain advances — better to fail over than queue behind saturated calls. The final safety-net step always waits. The circuit breaker handles cross-instance coordination; the semaphores are the proactive per-instance layer.
+
+### OpenRouter mode
+
+When constructed with `use_openrouter=True`, every call routes through a single `OpenRouterService` and the native cross-provider chain is bypassed — inter-model fallback is delegated to OpenRouter's server-side `models` array (capped at 3 entries, chain preference order preserved).
+
+```python
+llm = LLMServiceRouter(
+    use_openrouter=True,
+    openrouter_api_key=OPENROUTER_KEY,
+    openrouter_site_url="https://example.com",   # optional HTTP-Referer
+    openrouter_app_name="myproject",             # optional X-Title
+)
+```
+
+In OR mode, `default_fallback_chain()` hoists GPT to position 2 (right after the primary) for the fastest cross-provider failover. Gemini models are pinned to the `google-vertex` provider when the whole chain is Google. `OpenRouterService` is also usable standalone (accepts OpenRouter-native `vendor/model` slugs directly).
+
+### Observability (optional)
+
+When the `observability` extra is installed and `init_observability()` has been called (see `sunset/services/observability/README.md`), the router emits OpenTelemetry spans per call/attempt and metrics (`llm.request.total`, `llm.request.duration`, `llm.tokens`, `llm.cost.usd`, `llm.fallback.advanced`, `llm.breaker.*`, `llm.throttled`). Costs come from the pricing table in `pricing.py` (`compute_cost(model, input_tokens, output_tokens)` — USD per 1M tokens; edit there when vendor prices change). Without the extra, all instrumentation no-ops.
+
 ## API Reference
 
 ### `VertexAIGeminiService` Constructor
@@ -284,6 +307,22 @@ class BreakerProtocol(Protocol):
     "text": str,                          # Generated text
     "cited_chunks": list[SourceChunk],    # Source attributions (if file_search used)
     "tool_calls": list[ToolCall],         # Pending tool calls (if no executor)
+    "usage": Usage,                       # Token usage (all providers)
+    "diagnostics": dict,                  # Why a completion may be empty (OpenRouter)
+}
+```
+
+### `Usage` TypedDict
+
+Every provider extracts token usage into `response["usage"]`:
+
+```python
+{
+    "input_tokens": int,
+    "output_tokens": int,
+    "total_tokens": int,
+    "thinking_tokens": int,   # Gemini/Vertex reasoning tokens
+    "cached_tokens": int,     # prompt-cache hits
 }
 ```
 

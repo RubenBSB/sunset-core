@@ -61,6 +61,23 @@ deal = await hubspot.move_deal(access_token, deal_id, stage_id="closedwon")
 await hubspot.delete_deal(access_token, deal_id)
 ```
 
+## Contacts
+
+```python
+contact = await hubspot.get_contact(access_token, contact_id, properties=["email", "firstname"])
+contacts = await hubspot.list_contacts(access_token, limit=50)
+
+contact = await hubspot.create_contact(access_token, {"email": "a@b.com"})
+contact = await hubspot.update_contact(access_token, contact_id, {"firstname": "Ada"})
+await hubspot.delete_contact(access_token, contact_id)
+
+# Lookup by email — returns None if not found
+contact = await hubspot.find_contact_by_email(access_token, "a@b.com", properties=["firstname"])
+
+# Upsert keyed by email
+contact = await hubspot.create_or_update_contact_by_email(access_token, "a@b.com", {"firstname": "Ada"})
+```
+
 ## Properties & Pipelines
 
 ```python

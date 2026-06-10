@@ -11,6 +11,7 @@ from .base import (
     SourceChunk,
     ToolCall,
     ToolExecutor,
+    Usage,
     _split_tools,
 )
 from .store import OpenAIFileStore
@@ -55,6 +56,39 @@ class OpenAIService(LLMService):
         if not hasattr(self, "client"):
             return AsyncOpenAI(api_key=self.api_key)
         return self.client
+
+    @staticmethod
+    def _extract_usage(response) -> Usage:
+        # Responses API exposes input_tokens/output_tokens; Chat Completions
+        # exposes prompt_tokens/completion_tokens. Support both shapes.
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return {}
+        input_tokens = (
+            getattr(usage, "input_tokens", None)
+            or getattr(usage, "prompt_tokens", 0)
+            or 0
+        )
+        output_tokens = (
+            getattr(usage, "output_tokens", None)
+            or getattr(usage, "completion_tokens", 0)
+            or 0
+        )
+        total_tokens = getattr(usage, "total_tokens", 0) or (
+            input_tokens + output_tokens
+        )
+        cached = 0
+        details = getattr(usage, "input_tokens_details", None) or getattr(
+            usage, "prompt_tokens_details", None
+        )
+        if details:
+            cached = getattr(details, "cached_tokens", 0) or 0
+        return {
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
+            "total_tokens": int(total_tokens),
+            "cached_tokens": int(cached),
+        }
 
     @staticmethod
     def _reasoning_for(model: str) -> Optional[Dict[str, Any]]:
@@ -192,6 +226,7 @@ class OpenAIService(LLMService):
                 text=response.output_text,
                 cited_chunks=cited_chunks if cited_chunks else None,
                 tool_calls=tool_calls_made if tool_calls_made else None,
+                usage=self._extract_usage(response),
             )
 
         # Simple generation (possibly with file_search only)
@@ -233,6 +268,7 @@ class OpenAIService(LLMService):
             text=output_text,
             cited_chunks=cited_chunks if cited_chunks else None,
             tool_calls=None,
+            usage=self._extract_usage(response),
         )
 
     def _extract_file_search_sources(self, response) -> List[SourceChunk]:
@@ -363,6 +399,7 @@ class OpenAIService(LLMService):
             text=response["text"],
             cited_chunks=cited_chunks[:5] if cited_chunks else None,
             tool_calls=response.get("tool_calls"),
+            usage=response.get("usage"),
         )
 
     async def generate_json(

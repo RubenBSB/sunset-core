@@ -18,6 +18,7 @@ from .base import (
     SourceChunk,
     ToolCall,
     ToolExecutor,
+    Usage,
     _split_tools,
 )
 from .store import GeminiFileStore
@@ -66,6 +67,19 @@ class GeminiService(LLMService):
         if not hasattr(self, "client"):
             return genai.Client(api_key=self.api_key)
         return self.client
+
+    @staticmethod
+    def _extract_usage(response) -> Usage:
+        usage = getattr(response, "usage_metadata", None)
+        if not usage:
+            return {}
+        return {
+            "input_tokens": getattr(usage, "prompt_token_count", 0) or 0,
+            "output_tokens": getattr(usage, "candidates_token_count", 0) or 0,
+            "total_tokens": getattr(usage, "total_token_count", 0) or 0,
+            "thinking_tokens": getattr(usage, "thoughts_token_count", 0) or 0,
+            "cached_tokens": getattr(usage, "cached_content_token_count", 0) or 0,
+        }
 
     def _track_tokens(self, response, model: str, method: str, metric_tag: str = ""):
         """Extract usage_metadata from response and push to Cloud Monitoring."""
@@ -334,6 +348,7 @@ class GeminiService(LLMService):
                 text=response.text or "",
                 cited_chunks=cited_chunks if cited_chunks else None,
                 tool_calls=tool_calls_made if tool_calls_made else None,
+                usage=self._extract_usage(response),
             )
 
         # Simple generation
@@ -350,6 +365,7 @@ class GeminiService(LLMService):
             text=response.text,
             cited_chunks=cited_chunks if cited_chunks else None,
             tool_calls=None,
+            usage=self._extract_usage(response),
         )
 
     def _extract_gemini_grounding_sources(self, response) -> List[SourceChunk]:
@@ -694,4 +710,5 @@ class GeminiService(LLMService):
             text=response.text or "",
             cited_chunks=cited_chunks[:5] if cited_chunks else None,
             tool_calls=tool_calls_made if tool_calls_made else None,
+            usage=self._extract_usage(response),
         )

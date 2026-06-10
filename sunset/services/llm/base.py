@@ -58,10 +58,22 @@ class ToolCall(TypedDict):
     id: str
 
 
-class LLMResponse(TypedDict):
+class Usage(TypedDict, total=False):
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    thinking_tokens: int
+    cached_tokens: int
+
+
+class LLMResponse(TypedDict, total=False):
     text: str
     cited_chunks: Optional[List[SourceChunk]]
     tool_calls: Optional[List[ToolCall]]
+    usage: Optional[Usage]
+    # Why a completion may be empty: finish_reason, native_finish_reason,
+    # has_reasoning, refusal, iterations, hit_max_iterations, provider.
+    diagnostics: Optional[Dict[str, Any]]
 
 
 class FallbackStep(NamedTuple):
