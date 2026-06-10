@@ -88,11 +88,20 @@ class StorageService:
         return sa_email
 
     def _ensure_emulator_bucket(self):
-        """Create the bucket in the emulator if it doesn't exist."""
+        """Create the bucket in the emulator if it doesn't exist.
+
+        Idempotent across processes: `bucket.exists()` is unreliable on
+        fake-gcs-server, and another process (e.g. a worker) may have created the
+        bucket already, so we tolerate the 409 Conflict instead of crashing."""
+        from google.api_core.exceptions import Conflict
+
         bucket = self._client.bucket(self.bucket_name)
-        if not bucket.exists():
-            self._client.create_bucket(bucket)
-            logger.info(f"Created emulator bucket: {self.bucket_name}")
+        try:
+            if not bucket.exists():
+                self._client.create_bucket(bucket)
+                logger.info(f"Created emulator bucket: {self.bucket_name}")
+        except Conflict:
+            pass  # already created concurrently / exists() was stale — fine
 
     @classmethod
     def get_instance(cls):
@@ -194,6 +203,21 @@ class StorageService:
             )
 
         return url
+
+    def download_file(self, gcs_path: str) -> bytes:
+        """Download a blob's bytes. Server-side reads always reach the bucket
+        (or the local emulator), so this is the reliable way to serve private
+        objects to a browser that can't reach GCS directly — proxy through the
+        API instead of handing out a signed URL."""
+        if gcs_path.startswith("gs://"):
+            parts = gcs_path.replace("gs://", "").split("/", 1)
+            blob_path = parts[1] if len(parts) > 1 else ""
+        else:
+            blob_path = gcs_path
+
+        bucket = self._get_bucket()
+        blob = bucket.blob(blob_path)
+        return blob.download_as_bytes()
 
     def delete_file(self, gcs_path: str) -> bool:
         """
