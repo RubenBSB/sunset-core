@@ -1,4 +1,55 @@
-# EmailService
+# Email services
+
+This package holds **two** independent services:
+
+- **`EmailSendService`** — outbound transactional send (Resend / SendGrid). See [below](#emailsendservice).
+- **`EmailService`** — inbound IMAP listener (IDLE) for receiving emails. See [below](#emailservice-imap).
+
+Install deps via the extra: `pip install "sunsetai[email]"` (pulls resend, sendgrid, aioimaplib).
+
+---
+
+## EmailSendService
+
+Outbound **transactional email** with a pluggable engine (Resend or SendGrid).
+
+### Config
+
+Read from environment variables (or Secret Manager in non-local envs):
+
+| Key                | Purpose                                    | Default                 |
+| ------------------ | ------------------------------------------ | ----------------------- |
+| `EMAIL_ENGINE`     | `resend` or `sendgrid`                     | `resend`                |
+| `EMAIL_FROM`       | Default sender (`"Acme <hello@acme.com>"`) | `onboarding@resend.dev` |
+| `RESEND_API_KEY`   | API key when engine = `resend`             | —                       |
+| `SENDGRID_API_KEY` | API key when engine = `sendgrid`           | —                       |
+
+Engine SDKs are imported lazily, so only the selected engine's package must be installed.
+
+### Usage
+
+```python
+from sunset.services import EmailSendService
+
+ok = await EmailSendService.get_instance().send(
+    to="user@example.com",
+    subject="Welcome",
+    html="<p>Hello!</p>",
+    # from_email=...  # optional, overrides EMAIL_FROM
+    # text=...        # optional plain-text part
+)
+```
+
+`send()` runs the blocking SDK call off the event loop and **never raises**: with no API key
+(or on a provider error) it logs and returns `False`, so a flow's success never depends on email
+delivery. Switch providers by changing `EMAIL_ENGINE` — no code change.
+
+> Resend rejects unverified `from` domains. `onboarding@resend.dev` works out of the box in test
+> mode (delivers only to the account owner); set `EMAIL_FROM` to a verified-domain address for prod.
+
+---
+
+## EmailService (IMAP)
 
 IMAP-based email listener using IDLE for real-time email notifications. Supports Gmail, Outlook, and custom IMAP servers.
 

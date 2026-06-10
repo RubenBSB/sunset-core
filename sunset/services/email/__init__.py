@@ -1,14 +1,30 @@
+from __future__ import annotations
+
 import asyncio
 import email
 import logging
 from email.header import decode_header
-from typing import Any, Callable, Dict, List, Optional
-
-from aioimaplib import IMAP4_SSL
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from sunset.services.secrets import get_secrets
 
+if TYPE_CHECKING:
+    from aioimaplib import IMAP4_SSL
+
+# Outbound transactional sender lives alongside the inbound IMAP service in this
+# package; re-exported so `from sunset.services.email import EmailSendService`
+# works. `aioimaplib` (IMAP) is imported lazily in `_connect`, so importing the
+# sender never pulls the IMAP dependency.
+from .send import EmailSendService, get_email_sender
+
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "EmailService",
+    "get_email_service",
+    "EmailSendService",
+    "get_email_sender",
+]
 
 
 def get_email_service() -> "EmailService":
@@ -102,6 +118,8 @@ class EmailService:
 
     async def _connect(self):
         """Connect and authenticate to IMAP server"""
+        from aioimaplib import IMAP4_SSL
+
         self._client = IMAP4_SSL(host=self.imap_host, port=self.imap_port)
         await self._client.wait_hello_from_server()
 

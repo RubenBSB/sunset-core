@@ -5,6 +5,7 @@ __all__ = [
     "AuthService",
     "WhatsAppService",
     "extract_webhook_message",
+    "EmailSendService",
     "StorageService",
     "PubSubService",
     "AnalyticsService",
@@ -44,6 +45,10 @@ def __getattr__(name: str):
         from sunset.services.whatsapp import extract_webhook_message
 
         return extract_webhook_message
+    if name == "EmailSendService":
+        from sunset.services.email import EmailSendService
+
+        return EmailSendService
     if name == "StorageService":
         from sunset.services.storage import StorageService
 
