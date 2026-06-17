@@ -28,6 +28,8 @@ __all__ = [
     "SlackService",
     "init_observability",
     "instrument_fastapi",
+    "DuffelService",
+    "DuffelError",
 ]
 
 
@@ -142,4 +144,12 @@ def __getattr__(name: str):
         from sunset.services.observability import instrument_fastapi
 
         return instrument_fastapi
+    if name == "DuffelService":
+        from sunset.services.duffel import DuffelService
+
+        return DuffelService
+    if name == "DuffelError":
+        from sunset.services.duffel import DuffelError
+
+        return DuffelError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
