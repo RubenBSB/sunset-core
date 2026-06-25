@@ -89,6 +89,7 @@ all = [
 ]
 dev = [
     "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
     "pytest-timeout>=2.2.0",
     "httpx>=0.26.0",
 ]
@@ -118,6 +119,7 @@ exclude = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 markers = [
     "live: tests that hit a real external API (require credentials, skipped otherwise)",
 ]
