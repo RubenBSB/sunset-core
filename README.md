@@ -1,6 +1,6 @@
 # 🌅 sunset-core
 
-Reusable **async** services for AI applications — the shared service layer extracted from the [Sunset](https://github.com/RubenBSB/sunset) framework, published standalone so any project can depend on it via `pip` without pulling in the scaffolding CLI, Terraform, or templates.
+Reusable **async** services for AI applications — auth, LLM routing, RAG, storage, pub/sub, and more — in one pip-installable package.
 
 Every service is async-first (`asyncpg`, `aio` methods), lazy-loaded (you only import the heavy dependency you actually use), and provider-agnostic where it makes sense (LLM routing, multi-provider email, etc.).
 
