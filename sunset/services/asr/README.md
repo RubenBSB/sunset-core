@@ -7,7 +7,7 @@ Automatic Speech Recognition powered by [Deepgram](https://deepgram.com). Transc
 **Install the optional dependency:**
 
 ```bash
-pip install "sunset[asr]"
+pip install "sunset-core[asr]"
 ```
 
 **Environment variables:**

@@ -110,4 +110,4 @@ Singleton. Reads `REDIS_URL` from env (default: `redis://localhost:6379`).
 redis>=5.0.0
 ```
 
-Install with: `pip install sunset[redis]` or `pip install sunset[all]`
+Install with: `pip install sunset-core[redis]` or `pip install sunset-core[all]`

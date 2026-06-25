@@ -18,7 +18,7 @@ Get an API key from the [Google Cloud Console](https://console.cloud.google.com/
 
 ### Dependencies
 
-Requires `httpx` (included in sunset base template), `youtube-transcript-api`, and `yt-dlp` (`pip install sunset[youtube]`). Audio download also requires `ffmpeg` on the system.
+Requires `httpx` (included in sunset base template), `youtube-transcript-api`, and `yt-dlp` (`pip install sunset-core[youtube]`). Audio download also requires `ffmpeg` on the system.
 
 ## Usage
 
