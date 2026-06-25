@@ -3,8 +3,11 @@
 Stateless — callers own token persistence (one TokenSet per workspace).
 """
 
+import hashlib
+import hmac
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -228,6 +231,33 @@ class SlackService:
             real_name=profile.get("real_name"),
         )
 
+    async def get_user_info(
+        self, access_token: str, user_id: str
+    ) -> Optional[SlackUser]:
+        """Resolve a Slack user_id → SlackUser (incl. email). None if missing.
+
+        The reverse of `lookup_user_by_email` — used when an inbound event gives
+        us a Slack user_id and we need their email to map back to an app user.
+        Requires the `users:read.email` scope for the email to be populated.
+        """
+        try:
+            async with self._http() as client:
+                body = await self._call(
+                    client, "users.info", access_token, params={"user": user_id}
+                )
+        except SlackError as exc:
+            if exc.slack_error == "user_not_found":
+                return None
+            raise
+        u = body.get("user") or {}
+        profile = u.get("profile") or {}
+        return SlackUser(
+            id=u.get("id", user_id),
+            email=profile.get("email"),
+            name=u.get("name"),
+            real_name=profile.get("real_name"),
+        )
+
     # -------------------------------------------------------------------------
     # Conversations
     # -------------------------------------------------------------------------
@@ -308,12 +338,95 @@ class SlackService:
         text: str,
         *,
         blocks: Optional[list[dict[str, Any]]] = None,
+        thread_ts: Optional[str] = None,
     ) -> PostedMessage:
         payload: dict[str, Any] = {"channel": channel, "text": text}
         if blocks is not None:
             payload["blocks"] = blocks
+        if thread_ts is not None:
+            payload["thread_ts"] = thread_ts
         async with self._http() as client:
             body = await self._call(
                 client, "chat.postMessage", access_token, json=payload
             )
         return PostedMessage(channel=body["channel"], ts=body["ts"])
+
+    async def update_message(
+        self,
+        access_token: str,
+        channel: str,
+        ts: str,
+        text: str,
+        *,
+        blocks: Optional[list[dict[str, Any]]] = None,
+    ) -> PostedMessage:
+        """Edit a message previously posted by the bot (chat.update).
+
+        Used to turn a placeholder ("🤔 …") into the final answer once the
+        agent has finished — Slack requires a <3s ack, so we post fast then
+        update in place.
+        """
+        payload: dict[str, Any] = {"channel": channel, "ts": ts, "text": text}
+        if blocks is not None:
+            payload["blocks"] = blocks
+        async with self._http() as client:
+            body = await self._call(
+                client, "chat.update", access_token, json=payload
+            )
+        return PostedMessage(channel=body["channel"], ts=body["ts"])
+
+    async def conversations_replies(
+        self,
+        access_token: str,
+        channel: str,
+        ts: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Fetch the messages of a thread (oldest → newest).
+
+        Returns raw Slack message dicts ({user, text, ts, bot_id?, …}); the
+        caller decides how to turn them into LLM conversation turns.
+        """
+        async with self._http() as client:
+            body = await self._call(
+                client,
+                "conversations.replies",
+                access_token,
+                params={"channel": channel, "ts": ts, "limit": limit},
+            )
+        return body.get("messages", [])
+
+    # -------------------------------------------------------------------------
+    # Inbound webhook security
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def verify_signature(
+        signing_secret: str,
+        timestamp: str,
+        body: bytes,
+        signature: str,
+        *,
+        max_skew_seconds: int = 60 * 5,
+    ) -> bool:
+        """Validate a Slack request signature (events, interactivity, commands).
+
+        Slack signs `v0:<timestamp>:<raw_body>` with HMAC-SHA256 keyed on the
+        app's signing secret. We reject stale timestamps (replay window) before
+        comparing digests in constant time. `body` must be the *raw* request
+        bytes — re-serializing the parsed JSON would change the signature.
+        """
+        if not signing_secret or not timestamp or not signature:
+            return False
+        try:
+            if abs(time.time() - int(timestamp)) > max_skew_seconds:
+                return False
+        except (TypeError, ValueError):
+            return False
+        basestring = b"v0:" + timestamp.encode() + b":" + body
+        digest = hmac.new(
+            signing_secret.encode(), basestring, hashlib.sha256
+        ).hexdigest()
+        expected = f"v0={digest}"
+        return hmac.compare_digest(expected, signature)

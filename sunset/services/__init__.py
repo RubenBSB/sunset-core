@@ -30,6 +30,8 @@ __all__ = [
     "instrument_fastapi",
     "DuffelService",
     "DuffelError",
+    "BookingService",
+    "BookingError",
 ]
 
 
@@ -152,4 +154,12 @@ def __getattr__(name: str):
         from sunset.services.duffel import DuffelError
 
         return DuffelError
+    if name == "BookingService":
+        from sunset.services.booking import BookingService
+
+        return BookingService
+    if name == "BookingError":
+        from sunset.services.booking import BookingError
+
+        return BookingError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
