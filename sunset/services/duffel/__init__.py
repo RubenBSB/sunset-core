@@ -138,6 +138,7 @@ class DuffelService:
         departure_date: Union[str, date, datetime],
         *,
         return_date: Optional[Union[str, date, datetime]] = None,
+        return_to: Optional[str] = None,
         adults: int = 1,
         max_offers: int = 10,
         cabin_class: Optional[str] = None,
@@ -145,9 +146,13 @@ class DuffelService:
         """Search flight offers via a one-shot Offer Request.
 
         `origin`/`destination` are IATA codes. Omitting `return_date` searches
-        one-way; supplying it adds the return slice. Offers come back sorted by
-        price ascending and trimmed to `max_offers`. Returns raw Duffel offers;
-        use `summarize_offers` for the compact, UI-friendly shape.
+        one-way; supplying it adds the return slice. `return_to` (an IATA code)
+        lands that return slice somewhere other than `origin` — an open-jaw, for
+        a traveller continuing on rather than coming home; it defaults to
+        `origin` (a plain round-trip) and is ignored without a `return_date`.
+        Offers come back sorted by price ascending and trimmed to `max_offers`.
+        Returns raw Duffel offers; use `summarize_offers` for the compact,
+        UI-friendly shape.
         """
         slices = [
             {
@@ -160,7 +165,7 @@ class DuffelService:
             slices.append(
                 {
                     "origin": destination,
-                    "destination": origin,
+                    "destination": return_to or origin,
                     "departure_date": _as_date_str(return_date),
                 }
             )

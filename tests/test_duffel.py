@@ -146,6 +146,45 @@ def test_round_trip_adds_return_slice():
     }
 
 
+def test_return_to_lands_the_return_slice_elsewhere():
+    seen = {}
+
+    def handler(method, url, kwargs):
+        seen["json"] = kwargs.get("json")
+        return FakeResp(json_body={"data": {"offers": []}})
+
+    svc = _svc()
+    with _patch(handler):
+        asyncio.run(
+            svc.search_flights(
+                "CDG",
+                "FCO",
+                date(2026, 6, 14),
+                return_date=date(2026, 6, 16),
+                return_to="MAD",
+            )
+        )
+    slices = seen["json"]["data"]["slices"]
+    assert slices[1] == {
+        "origin": "FCO",
+        "destination": "MAD",
+        "departure_date": "2026-06-16",
+    }
+
+
+def test_return_to_without_return_date_stays_one_way():
+    seen = {}
+
+    def handler(method, url, kwargs):
+        seen["json"] = kwargs.get("json")
+        return FakeResp(json_body={"data": {"offers": []}})
+
+    svc = _svc()
+    with _patch(handler):
+        asyncio.run(svc.search_flights("CDG", "FCO", date(2026, 6, 14), return_to="MAD"))
+    assert len(seen["json"]["data"]["slices"]) == 1
+
+
 def test_offers_sorted_by_price_and_trimmed():
     def handler(method, url, kwargs):
         return FakeResp(
