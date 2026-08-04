@@ -24,7 +24,8 @@ quoting the passage) must understand it without the rest of the page.
 - 1000-1600 words total.
 - Use concrete numbers, statistics, and named facts from the provided sources; cite \
 them inline with markdown links. Aim for at least one sourced fact per section. \
-NEVER invent statistics or sources — only cite what is in the provided research.
+NEVER invent statistics or sources — only cite facts from the provided research \
+or from web pages you actually retrieved yourself.
 - Include one markdown comparison table when the topic lends itself to it.
 - No generic filler ("in today's fast-paced world…"), no fluffy conclusion. End \
 with a short FAQ (2-3 real questions with direct answers) when natural.
@@ -84,11 +85,15 @@ class SEOService:
 
     Args:
         llm: LLM service instance for content generation.
-        crawl: Crawl service instance for web research.
-        model: Model identifier for LLM calls (e.g. "gemini-2.5-flash").
+        crawl: Crawl service instance for web research. Pass ``None`` when the
+            model does its own web research (e.g. an OpenRouter ``:online``
+            model or a provider-native search tool) — the crawl step is then
+            skipped and the model is instructed to find and cite sources itself.
+        model: Model identifier for LLM calls (e.g. "gemini-2.5-flash",
+            "anthropic/claude-opus-5:online").
     """
 
-    def __init__(self, llm: LLMService, crawl: CrawlService, model: str):
+    def __init__(self, llm: LLMService, crawl: CrawlService | None, model: str):
         self.llm = llm
         self.crawl = crawl
         self.model = model
@@ -110,9 +115,14 @@ class SEOService:
         Returns:
             BlogPost with content, metadata, sources, and timestamp.
         """
-        # 1. Research: crawl the web for sources
-        logger.info("Researching topic: %s", topic)
-        research = await self._research(topic, max_sources=max_sources)
+        # 1. Research: crawl the web for sources (skipped when the model
+        #    searches the web itself)
+        if self.crawl is not None:
+            logger.info("Researching topic: %s", topic)
+            research = await self._research(topic, max_sources=max_sources)
+        else:
+            logger.info("No crawl service — delegating research to the model")
+            research = []
 
         # 2. Write the article
         logger.info("Generating article in '%s'", language)
@@ -268,14 +278,23 @@ class SEOService:
     async def _write_article(
         self, topic: str, sources: list[dict[str, str]], language: str
     ) -> str:
-        """Generate the article from researched sources."""
-        source_text = "\n\n---\n\n".join(
-            f"Source: {s['url']}\nTitle: {s['title']}\n\n{s['content']}"
-            for s in sources
-        )
-
+        """Generate the article from researched sources (or from the model's
+        own web research when no sources are provided)."""
         system = BLOG_SYSTEM_PROMPT.format(language=language)
-        user_msg = f"Topic: {topic}\n\nResearch sources:\n\n{source_text}"
+        if sources:
+            source_text = "\n\n---\n\n".join(
+                f"Source: {s['url']}\nTitle: {s['title']}\n\n{s['content']}"
+                for s in sources
+            )
+            user_msg = f"Topic: {topic}\n\nResearch sources:\n\n{source_text}"
+        else:
+            user_msg = (
+                f"Topic: {topic}\n\n"
+                "No pre-crawled sources are provided: research this topic on the "
+                "web yourself before writing. Use only facts you actually found, "
+                "and cite each one inline with a markdown link to its real URL. "
+                "Never fabricate a statistic, a quote, or a URL."
+            )
 
         messages = [
             {"role": "system", "content": system},
