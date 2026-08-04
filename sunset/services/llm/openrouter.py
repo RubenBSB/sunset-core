@@ -231,6 +231,30 @@ class OpenRouterService(LLMService):
                 elif ptype == "image_description":
                     desc = part.get("description", "no description")
                     parts.append({"type": "text", "text": f"[image: {desc}]"})
+                elif ptype == "file":
+                    # OpenRouter file part (e.g. native PDF for models with the
+                    # `file` input modality): pass through unchanged.
+                    f = part.get("file")
+                    if isinstance(f, dict) and f.get("file_data"):
+                        parts.append({"type": "file", "file": f})
+                elif ptype == "inline_data":
+                    # Vertex-style raw bytes part — convert to an OpenRouter
+                    # file part so the same message works on both providers.
+                    data = part.get("data")
+                    mime = part.get("mime_type", "application/octet-stream")
+                    if isinstance(data, (bytes, bytearray)):
+                        import base64 as _b64
+
+                        parts.append(
+                            {
+                                "type": "file",
+                                "file": {
+                                    "filename": part.get("filename", "document"),
+                                    "file_data": f"data:{mime};base64,"
+                                    + _b64.b64encode(data).decode(),
+                                },
+                            }
+                        )
 
             if role in ("system", "developer"):
                 text = "\n".join(p["text"] for p in parts if p.get("type") == "text")
