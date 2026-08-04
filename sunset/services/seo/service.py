@@ -9,6 +9,23 @@ from sunset.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
 
+
+def extract_json(text: str) -> dict:
+    """Defensively parse JSON from model output: providers that don't enforce
+    ``response_format`` (e.g. Anthropic models, ``:online`` variants) may wrap
+    the payload in prose or markdown fences."""
+    import json as _json
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+        if cleaned.rstrip().endswith("```"):
+            cleaned = cleaned.rstrip()[:-3]
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError(f"No JSON object found in model output: {text[:200]!r}")
+    return _json.loads(cleaned[start : end + 1])
+
 BLOG_SYSTEM_PROMPT = """\
 You are an expert SEO/GEO blog writer. Your articles must rank in classic search AND \
 be citable by AI answer engines (ChatGPT, Perplexity, Google AI Overviews), which \
@@ -201,9 +218,7 @@ class SEOService:
             text_format=MetadataResponse,
         )
 
-        import json
-
-        data = json.loads(response["text"])
+        data = extract_json(response["text"])
 
         json_ld = None
         if base_url:
