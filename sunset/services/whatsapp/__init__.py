@@ -260,6 +260,50 @@ class WhatsappService:
                 detail="WhatsApp API request failed",
             )
 
+    async def send_document(
+        self,
+        http_client: httpx.AsyncClient,
+        to: str,
+        link: str,
+        filename: str,
+        caption: str | None = None,
+    ) -> None:
+        """Send a document by URL — Meta fetches the link (signed URLs work,
+        must stay fetchable a few minutes). Caption is optional, 1024 chars max
+        per the Cloud API."""
+        url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}/{self._phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        document: dict = {"link": link, "filename": filename}
+        if caption:
+            document["caption"] = caption[:1024]
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "document",
+            "document": document,
+        }
+
+        try:
+            response = await http_client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                f"WhatsApp API error: {exc.response.status_code} | {exc.response.text}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to send WhatsApp document",
+            )
+        except httpx.HTTPError as exc:
+            logger.exception(f"WhatsApp API request failed: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="WhatsApp API request failed",
+            )
+
     # -------------------------------------------------------------------------
     # Message Processing
     # -------------------------------------------------------------------------
