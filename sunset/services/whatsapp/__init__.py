@@ -260,6 +260,60 @@ class WhatsappService:
                 detail="WhatsApp API request failed",
             )
 
+    async def send_buttons(
+        self,
+        http_client: httpx.AsyncClient,
+        to: str,
+        text: str,
+        buttons: "list[tuple[str, str]]",
+    ) -> None:
+        """Send an interactive reply-buttons message (Cloud API limits: 3
+        buttons max, titles 20 chars, body 1024 chars). Each button is an
+        (id, title) pair; the tap comes back in the webhook as
+        `interactive.button_reply.{id,title}`."""
+        whatsapp_text = self._convert_to_whatsapp_markdown(text)
+        url = f"https://graph.facebook.com/{self.GRAPH_API_VERSION}/{self._phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": whatsapp_text[:1024]},
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {"id": bid[:256], "title": title[:20]},
+                        }
+                        for bid, title in buttons[:3]
+                    ]
+                },
+            },
+        }
+
+        try:
+            response = await http_client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                f"WhatsApp API error: {exc.response.status_code} | {exc.response.text}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to send WhatsApp buttons",
+            )
+        except httpx.HTTPError as exc:
+            logger.exception(f"WhatsApp API request failed: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="WhatsApp API request failed",
+            )
+
     async def send_document(
         self,
         http_client: httpx.AsyncClient,
