@@ -46,8 +46,23 @@ or from web pages you actually retrieved yourself.
 - Include one markdown comparison table when the topic lends itself to it.
 - No generic filler ("in today's fast-paced world…"), no fluffy conclusion. End \
 with a short FAQ (2-3 real questions with direct answers) when natural.
-- NEVER use em dashes (—). Use commas, colons, parentheses or separate sentences \
-instead.
+
+Voice and style (CRITICAL, this is what separates the article from AI slop):
+- The article must read as if written by a careful human expert, never like AI \
+output. Vary sentence length and rhythm. Prefer plain, concrete words. Take a \
+point of view instead of hedging everything.
+- Banned AI-tell phrases and tics: "delve", "landscape", "game-changer", \
+"seamless", "leverage" (as a verb), "it's important to note", "in conclusion", \
+"moreover", symmetrical "It's not X, it's Y" constructions, and rhetorical \
+questions as section openers.
+- NEVER use em dashes (—). This is the single strongest AI tell. Use commas, \
+colons, parentheses or separate sentences instead.
+- Bold (**) a handful of genuinely key terms or figures, at most 4-5 per \
+article, never full sentences. If everything is bold, nothing is.
+- Highlight AT MOST 3 key sentences per article as newspaper-style pull quotes: \
+a standalone markdown blockquote (>) containing one strong, quotable sentence \
+from your own text (no attribution, no quotation marks). Zero is fine for \
+short or dry topics.
 - Optimized for search without keyword stuffing; engaging and natural to read.
 
 Return ONLY the article body in markdown (no title — it will be added separately)."""
