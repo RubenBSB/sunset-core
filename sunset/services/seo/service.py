@@ -46,6 +46,8 @@ or from web pages you actually retrieved yourself.
 - Include one markdown comparison table when the topic lends itself to it.
 - No generic filler ("in today's fast-paced world…"), no fluffy conclusion. End \
 with a short FAQ (2-3 real questions with direct answers) when natural.
+- NEVER use em dashes (—). Use commas, colons, parentheses or separate sentences \
+instead.
 - Optimized for search without keyword stuffing; engaging and natural to read.
 
 Return ONLY the article body in markdown (no title — it will be added separately)."""
@@ -65,8 +67,9 @@ You are a professional translator. Translate the following content from {source}
 Rules:
 - Preserve all markdown formatting exactly
 - Preserve all links and URLs unchanged
-- Translate naturally, not literally — adapt idioms and phrasing
+- Translate naturally, not literally: adapt idioms and phrasing
 - Keep technical terms in their commonly used form in {target}
+- Never use em dashes (—); prefer commas, colons or separate sentences
 
 Return ONLY the translated content, nothing else."""
 
