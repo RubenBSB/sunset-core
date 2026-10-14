@@ -6,6 +6,7 @@ import uuid
 import pytest
 import pytest_asyncio
 
+pytest.importorskip("sqlalchemy")
 pytest.importorskip("aiosqlite")
 from sqlalchemy import UUID, Boolean, Column, DateTime, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

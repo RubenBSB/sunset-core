@@ -18,7 +18,7 @@ jobs:
           python -m pip install --upgrade pip
           # Extras cover the deps imported by the test suite (chat→llm, crawl, email).
           # Add a service's extra here when you add tests that import it.
-          pip install -e ".[llm,crawl,email,auth,dev]" ruff aiosqlite
+          pip install -e ".[llm,crawl,email,auth,dev]" ruff aiosqlite sqlalchemy
       - name: Lint
         run: ruff check .
       - name: Test
