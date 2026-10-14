@@ -27,10 +27,13 @@ class SecretsService:
             "GOOGLE_CLOUD_PROJECT"
         )
 
-        if self.env == "local":
-            pass
-        else:
-            self.secret_client = secretmanager.SecretManagerServiceClient()
+        self._secret_client = None
+
+    @property
+    def secret_client(self):
+        if self._secret_client is None:
+            self._secret_client = secretmanager.SecretManagerServiceClient()
+        return self._secret_client
 
     @lru_cache(maxsize=128)
     def get_secret(self, secret_name: str, default: Optional[str] = None) -> str:
@@ -48,7 +51,7 @@ class SecretsService:
             return env_value
 
         # Local: env var is the only source
-        if self.env == "local":
+        if self.env in ("local", "test"):
             if default is not None:
                 return default
             raise ValueError(f"Missing secret {env_var} in environment")
