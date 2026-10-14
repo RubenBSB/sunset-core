@@ -34,6 +34,7 @@ Usage:
 import hashlib
 import logging
 import secrets as secrets_mod
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -241,6 +242,14 @@ class AuthService:
         self._ensure_refresh_model()
         Model = self.refresh_token_model
 
+        # Callers pass the id as a string; the column is a UUID. Postgres
+        # coerces the string, SQLite (tests) does not — normalize here.
+        if isinstance(user_id, str):
+            try:
+                user_id = uuid.UUID(user_id)
+            except ValueError:
+                pass
+
         raw_token = secrets_mod.token_urlsafe(32)
         token_hash = self._hash_refresh_token(raw_token)
         expires_at = datetime.now(timezone.utc) + timedelta(
@@ -289,7 +298,11 @@ class AuthService:
             await self._revoke_family(db_token.user_id, session)
             raise ValueError("Refresh token reuse detected — all sessions revoked")
 
-        if db_token.expires_at < datetime.now(timezone.utc):
+        expires_at = db_token.expires_at
+        if expires_at.tzinfo is None:
+            # SQLite returns naive datetimes for timezone-aware columns.
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
             raise ValueError("Refresh token expired")
 
         user_id = str(db_token.user_id)
